@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <title>Glasses UI</title>
+  <style>
+    body { font-family: -apple-system, system-ui, sans-serif; margin: 16px; }
+    .row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+    button { padding: 10px 14px; font-size: 16px; }
+    .pill { padding: 6px 10px; border-radius: 999px; border: 1px solid #888; }
+    video { width: 100%; max-width: 520px; border-radius: 12px; background: #111; }
+    pre { white-space: pre-wrap; word-break: break-word; border: 1px solid #444; border-radius: 12px; padding: 10px; }
+    .grid { display: grid; grid-template-columns: 1fr; gap: 12px; max-width: 720px; }
+    .small { font-size: 13px; color: #666; }
+  </style>
+</head>
+<body>
+  <div class="grid">
+    <div class="row">
+      <strong>Glasses UI</strong>
+      <span id="statusPill" class="pill">disconnected</span>
+    </div>
+
+    <div class="row">
+      <button id="startButton">Start</button>
+      <button id="stopButton" disabled>Stop</button>
+
+      <label class="small">
+        Frames/sec:
+        <input id="fpsInput" type="number" min="0" max="10" value="2" style="width:64px;">
+      </label>
+      <label class="small">
+        Audio chunk (ms):
+        <input id="audioChunkMsInput" type="number" min="100" max="2000" value="400" style="width:76px;">
+      </label>
+    </div>
+
+    <div>
+      <div class="small">Camera preview (back camera)</div>
+      <video id="preview" playsinline autoplay muted></video>
+    </div>
+
+    <div>
+      <div class="small">Transcript (from server)</div>
+      <pre id="transcriptBox"></pre>
+    </div>
+
+    <div>
+      <div class="small">Assistant output (from server)</div>
+      <pre id="assistantBox"></pre>
+    </div>
+
+    <div>
+      <div class="small">Laptop task status (from server)</div>
+      <pre id="taskBox"></pre>
+    </div>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
