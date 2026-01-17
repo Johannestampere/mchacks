@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import ssl
+import certifi
+
 import asyncio
 import base64
 import contextlib
@@ -96,7 +99,9 @@ async def openai_transcription_worker(
 
     try:
         await send_status("info", "Connecting to OpenAI realtime transcription WS...")
-        async with websockets.connect(REALTIME_TRANSCRIBE_URL, additional_headers=headers) as ws:
+        ssl_context = ssl.create_default_context(cafile=certifi.where())
+
+        async with websockets.connect(REALTIME_TRANSCRIBE_URL, additional_headers=headers, ssl=ssl_context,) as ws:
             await send_status("info", "Connected to OpenAI realtime transcription WS")
 
             await ws.send(json.dumps({
