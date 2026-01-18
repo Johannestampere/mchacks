@@ -1,0 +1,10 @@
+OVERVIEW.md
+TODOLIST.md
+device_bridge/venv
+device_bridge/venv*
+.env
+*env*
+backend/.env.local
+device_bridge/test_lam.py
+device_bridge/__pycache__
+device_bridge/test_click.py

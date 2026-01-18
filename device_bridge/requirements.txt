@@ -1,0 +1,5 @@
+websockets
+pyautogui
+Pillow
+google-genai
+python-dotenv
