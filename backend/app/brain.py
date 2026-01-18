@@ -8,6 +8,8 @@ from __future__ import annotations
 import base64
 import json
 import os
+import re
+import time
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -19,18 +21,50 @@ OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1/chat/completions"
 # Max conversation history to keep (user + assistant pairs)
 MAX_HISTORY_TURNS = 10
 
+# Wake phrase patterns (case-insensitive)
+WAKE_PHRASES = [
+    r"\bhey[,\s]+wink\b",
+    r"\bhi[,\s]+wink\b",
+    r"\bokay[,\s]+wink\b",
+    r"\bok[,\s]+wink\b",
+]
+
+# Seconds of inactivity before requiring wake phrase again
+CONVERSATION_TIMEOUT = 30.0
+
+
+def _contains_wake_phrase(text: str) -> bool:
+    """Check if the text contains a wake phrase."""
+    text_lower = text.lower()
+    for pattern in WAKE_PHRASES:
+        if re.search(pattern, text_lower):
+            return True
+    return False
+
+
+def _strip_wake_phrase(text: str) -> str:
+    """Remove the wake phrase from the text."""
+    text_stripped = text
+    for pattern in WAKE_PHRASES:
+        text_stripped = re.sub(pattern, "", text_stripped, flags=re.IGNORECASE)
+    return text_stripped.strip(" ,.")
+
 
 @dataclass
 class Conversation:
-    """Maintains conversation history."""
+    """Maintains conversation history and activation state."""
     messages: list[dict] = field(default_factory=list)
+    last_interaction: float = 0.0
+    is_active: bool = False
 
     def add_user_message(self, content: str) -> None:
         self.messages.append({"role": "user", "content": content})
+        self.last_interaction = time.time()
         self._trim()
 
     def add_assistant_message(self, content: str) -> None:
         self.messages.append({"role": "assistant", "content": content})
+        self.last_interaction = time.time()
         self._trim()
 
     def _trim(self) -> None:
@@ -44,6 +78,21 @@ class Conversation:
 
     def clear(self) -> None:
         self.messages = []
+        self.is_active = False
+
+    def check_active(self) -> bool:
+        """Check if conversation is still active (within timeout)."""
+        if not self.is_active:
+            return False
+        if time.time() - self.last_interaction > CONVERSATION_TIMEOUT:
+            self.is_active = False
+            return False
+        return True
+
+    def activate(self) -> None:
+        """Activate the conversation (wake phrase detected)."""
+        self.is_active = True
+        self.last_interaction = time.time()
 
 
 @dataclass
@@ -52,6 +101,12 @@ class Device:
     device_id: str
     name: str
     device_type: str  # e.g., "laptop", "phone", "tablet"
+
+
+@dataclass
+class IgnoredResponse:
+    """Response when wake phrase not detected and conversation inactive."""
+    pass
 
 
 @dataclass
@@ -69,7 +124,7 @@ class DeviceActionResponse:
     task_type: str = "laptop"
 
 
-BrainResponse = SimpleResponse | DeviceActionResponse
+BrainResponse = IgnoredResponse | SimpleResponse | DeviceActionResponse
 
 
 def _build_system_prompt(devices: list[Device]) -> str:
@@ -90,6 +145,15 @@ def _build_system_prompt(devices: list[Device]) -> str:
 - NEVER thank the user for sharing visuals - you simply see through the glasses
 - Respond naturally as if you're right there with them
 - Keep responses brief and conversational (this is voice output)
+
+## Conversation Style:
+- Give DIRECT, helpful answers - don't ask unnecessary follow-up questions
+- Be assertive and take action when the intent is clear
+- Only ask for clarification when you genuinely cannot proceed without more info
+- If someone asks "what's this?" - just tell them what you see
+- If someone asks about something you can see, answer directly
+- Avoid responses like "What would you like to know about it?" or "How can I help with that?"
+- One natural response per turn, then wait for them to speak again
 
 ## Available Devices:
 {devices_block}
@@ -135,16 +199,40 @@ async def process_input(
         conversation: Optional conversation history for context
 
     Returns:
-        Either a SimpleResponse for conversational replies,
-        or a DeviceActionResponse for device control actions
+        IgnoredResponse if not activated,
+        SimpleResponse for conversational replies,
+        or DeviceActionResponse for device control actions
     """
+    # Check for wake phrase activation
+    has_wake_phrase = _contains_wake_phrase(transcript)
+    is_active = conversation.check_active() if conversation else False
+
+    if not has_wake_phrase and not is_active:
+        # Not activated - ignore this input
+        return IgnoredResponse()
+
+    # Activate conversation if wake phrase detected
+    if has_wake_phrase and conversation:
+        conversation.activate()
+
+    # Strip wake phrase from transcript for processing
+    clean_transcript = _strip_wake_phrase(transcript) if has_wake_phrase else transcript
+
+    # If only wake phrase with no actual query, respond with acknowledgment
+    if not clean_transcript.strip():
+        answer = "Yes?"
+        if conversation:
+            conversation.add_user_message(transcript)
+            conversation.add_assistant_message(answer)
+        return SimpleResponse(answer=answer)
+
     if not OPENROUTER_API_KEY:
         raise RuntimeError("OPENROUTER_API_KEY environment variable is not set")
 
     system_prompt = _build_system_prompt(devices)
 
     # Build message content for current turn
-    user_content: list = [{"type": "text", "text": transcript}]
+    user_content: list = [{"type": "text", "text": clean_transcript}]
 
     # Add the most recent frame if available
     if frames:

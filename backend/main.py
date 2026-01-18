@@ -18,7 +18,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
-from backend.app.brain import Conversation, DeviceActionResponse, process_transcript
+from backend.app.brain import Conversation, DeviceActionResponse, IgnoredResponse, process_transcript
 from backend.app.device_registry import DEVICES
 from backend.app.tts import stream_tts
 
@@ -253,6 +253,11 @@ async def ws_phone(websocket: WebSocket) -> None:
             return
 
         response = await process_transcript(transcript, latest_jpeg_frame, DEVICES, conversation)
+
+        # If not activated (no wake phrase and conversation inactive), ignore
+        if isinstance(response, IgnoredResponse):
+            return
+
         await send_json({"type": "assistant_text", "text": response.answer})
 
         # Speak the response
