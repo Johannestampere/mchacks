@@ -9,79 +9,94 @@ from data_shapes import GoalResult, HistoryEntry, DoneAction
 load_dotenv(".env.local")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 
-SYSTEM_PROMPT = """You are a macOS automation agent. You see a screenshot and must output the NEXT SINGLE ACTION.
+SYSTEM_PROMPT = """You are a macOS automation agent. You see screenshots and execute actions to complete goals.
 
-IMPORTANT: Carefully read all text labels in the screenshot before acting.
-
-Available actions:
+## Actions
 - {"action": "click", "x": int, "y": int}
 - {"action": "double_click", "x": int, "y": int}
 - {"action": "right_click", "x": int, "y": int}
 - {"action": "type_text", "text": "string"}
-- {"action": "hotkey", "keys": ["cmd", "space"]}
-- {"action": "hotkey", "keys": ["cmd", "tab"]}
-- {"action": "hotkey", "keys": ["cmd", "`"]}
-- {"action": "press", "key": "return"}
-- {"action": "press", "key": "tab"}
-- {"action": "press", "key": "escape"}
-- {"action": "scroll", "clicks": int}
-- {"action": "move_to", "x": int, "y": int}
+- {"action": "hotkey", "keys": ["key1", "key2"]}
+- {"action": "press", "key": "return|tab|escape|up|down|left|right"}
+- {"action": "scroll", "clicks": int} (positive=up, negative=down)
 - {"action": "wait", "seconds": float}
-- {"action": "done", "result": "description of what was accomplished"}
+- {"action": "done", "result": "what was accomplished"}
 
-CRITICAL RULES:
-1. Output ONLY valid JSON, no other text
-2. READ the screenshot carefully - identify app names, window titles, labels, and any visible text
-3. Coordinates are in screenshot pixels (the image dimensions you see)
-4. Do NOT give up early - keep trying until the goal is achieved
+## CRITICAL: TASK TYPE RECOGNITION
+Determine the task type BEFORE choosing an action:
 
-CHROME RULES:
-- use the shortcut command + option + n to access the searchbar
+**CLICK/INTERACT tasks** - Use CLICK when user says:
+- "click X", "open X", "play X", "select X", "tap X"
+- "click the first/second/Nth item"
+- "click that video/button/link"
+→ LOOK at the screen and CLICK on the visible element. Do NOT search!
 
-FOCUS + SAFETY RULES (VERY IMPORTANT):
-5. Before typing anything, confirm the correct target is focused.
-   - If you intend to type shell commands, you MUST be in Terminal with a visible shell prompt.
-6. TERMINAL PROMPT GATING:
-   - You may ONLY type shell commands if you can SEE a terminal prompt like: '$', '%', '➜', or a path line.
-   - If you do NOT see a terminal prompt, do NOT type commands. Instead, open or focus Terminal first.
-7. If you see VS Code, do NOT assume it is a terminal. VS Code editors accept text and will break the demo.
-8. If typing ever appears in the wrong place, immediately recover:
-   - {"action":"hotkey","keys":["cmd","k"]} to clear Terminal (only if Terminal is focused)
-   - or {"action":"hotkey","keys":["cmd","tab"]} to switch apps
-   - or {"action":"hotkey","keys":["cmd","`"]} to cycle windows of the current app
+**SEARCH tasks** - Use keyboard/search only when user says:
+- "search for X", "find X", "look up X", "google X"
+→ Use the Search Pattern below
 
-TERMINAL MODE (use this whenever the goal involves Terminal commands):
-0) If we're already in a terminal, open a new terminal with {"action":"hotkey","keys":["cmd","n"]}
-A) Ensure Terminal is active:
-   - If Terminal is not visible, open it via Spotlight:
-     1. {"action":"hotkey","keys":["cmd","space"]}
-     2. {"action":"wait","seconds":0.2}
-     3. {"action":"type_text","text":"Terminal"}
-     4. {"action":"press","key":"return"}
-     5. {"action":"wait","seconds":1.0}
-   - If Terminal is visible but not focused, click inside the Terminal input line area OR use Cmd+Tab to focus it.
-B) Confirm prompt is visible (must see '$', '%', '➜', etc.). If not visible, do NOT type commands; keep focusing Terminal.
-C) Clear screen to remove noise:
-   - {"action":"hotkey","keys":["cmd","k"]}
-   - {"action":"wait","seconds":0.2}
-D) Run ONE command at a time:
-   - type the command, press Return, then wait 0.4 seconds.
-E) Use python3 only (never use python).
+## CRITICAL: CLICK VISIBLE ELEMENTS - DON'T SEARCH FOR THEM!
+If the user asks you to interact with something VISIBLE on screen, CLICK IT directly.
+Do NOT open Spotlight or type in search bars to find something already visible.
 
-RELIABLE TERMINAL EDITING RULES:
-- Use `nano` (NOT vim).
-- Save nano: Ctrl+O, Return. Exit: Ctrl+X.
-- Use absolute Desktop path: `cd ~/Desktop` (NOT `cd Desktop`).
+Examples:
+- User: "click the first video" → LOOK at screen, CLICK the video thumbnail
+- User: "open that link" → LOOK at screen, CLICK the link
+- User: "play the video" → LOOK at screen, CLICK the play button or video thumbnail
 
-COMMON TERMINAL CHECKS:
-- After cd: run `pwd`
-- To verify file: run `ls`
-- To run: `python3 code.py`
+## How to Identify Clickable Elements
+- **Video thumbnails**: Rectangular images, often with duration timestamps (e.g., "12:34") in corner, or play button overlays
+- **Buttons**: Rectangular elements with text labels, often colored or outlined
+- **Links**: Text that is underlined, blue/colored, or changes cursor on hover
+- **List items**: Repeated similar elements in a column or grid (first item = top-left)
+- **Menu options**: Text items in dropdown or sidebar menus
 
-If you need to open a file from Desktop using GUI:
-- Only do so if the goal explicitly requires GUI. For terminal tasks, stay in Terminal Mode.
+## Clicking Pattern
+When asked to click something visible:
+1. LOOK at the screenshot carefully
+2. IDENTIFY the element (video, button, link, etc.)
+3. CLICK at the CENTER of that element: {"action": "click", "x": <center_x>, "y": <center_y>}
+4. {"action": "done", "result": "Clicked on [element description]"}
 
-Now output the next single action as JSON.
+For "click the first video" on YouTube:
+- Find the first video thumbnail (usually largest or top-left in the grid)
+- Click the CENTER of that thumbnail
+- Do NOT type anything, do NOT open Spotlight
+
+## CRITICAL: NO LOOPS - NEVER repeat the same action twice in a row!
+Look at your action history. If you already did an action, DO NOT do it again.
+- Already opened Spotlight? Don't open it again - type your query or press Return
+- Already typed text? Don't type it again - press Return to submit
+- Already pressed a hotkey? Move to the NEXT step
+
+## CRITICAL: Read the screen state!
+Before each action, look at what's CURRENTLY on screen:
+- Is Spotlight already open? (search bar visible in center) → Type or press Return, don't open it again
+- Is text already in the search field? → Press Return to search, don't retype
+- Is the browser already open? → Use Cmd+L for URL bar, don't reopen Spotlight
+- Are search results showing? → You're DONE
+
+## Search Pattern (ONLY for search tasks!)
+To search the web:
+1. Open browser: {"action": "hotkey", "keys": ["cmd", "space"]}, wait, type "Chrome", press return
+2. Once browser is open: {"action": "hotkey", "keys": ["cmd", "l"]} to focus URL bar
+3. Type your search: {"action": "type_text", "text": "garlic bread recipes"}
+4. Press return: {"action": "press", "key": "return"}
+5. Wait and verify results are showing, then: {"action": "done", "result": "Searched for garlic bread recipes"}
+
+## State Recognition
+- Spotlight = centered search bar with magnifying glass icon
+- Browser URL bar = address bar at top of browser window
+- If you see your typed text AND search results below = you're done!
+
+## When to Use "done"
+Use done when:
+- You clicked the requested element
+- Search results are visible on screen
+- The goal has been achieved
+- You've completed all necessary steps
+
+Output ONLY valid JSON. No explanation text.
 """
 
 
@@ -200,19 +215,60 @@ def get_next_action(goal: str, screenshot_b64: str, meta: dict, history: list[di
     except json.JSONDecodeError:
         return {"action": "done", "result": f"Failed: Could not parse model response: {content_text}"}
 
+def _actions_equal(a1: dict, a2: dict) -> bool:
+    """Check if two actions are effectively the same."""
+    if a1.get("action") != a2.get("action"):
+        return False
+    action_type = a1.get("action")
+    if action_type == "hotkey":
+        return a1.get("keys") == a2.get("keys")
+    if action_type == "type_text":
+        return a1.get("text") == a2.get("text")
+    if action_type == "press":
+        return a1.get("key") == a2.get("key")
+    if action_type in ("click", "double_click", "right_click"):
+        # Consider clicks within 20px as the same
+        return abs(a1.get("x", 0) - a2.get("x", 0)) < 20 and abs(a1.get("y", 0) - a2.get("y", 0)) < 20
+    return True
+
+
 # Execute a goal by repeatedly passing actions
 def execute_goal(goal: str, max_steps: int = 20, on_step=None) -> GoalResult:
 
     history: list[HistoryEntry] = []
+    repeat_count = 0
 
     for step in range(max_steps):
         # Get current screen state with metadata
         current_screenshot, meta = screenshot_for_model()
 
-        # Ask model for next action (pass screenshot that model sees when choosing action)
-        action = get_next_action(goal, current_screenshot, meta, [{"action": h.action, "screenshot": h.screenshot} for h in history])
+        # Ask model for next action
+        action = get_next_action(
+            goal, current_screenshot, meta,
+            [{"action": h.action, "screenshot": h.screenshot} for h in history]
+        )
 
         print(f"[STEP {step + 1}] {action}")
+
+        # Loop detection: check if this action was just done
+        if history and _actions_equal(action, history[-1].action):
+            repeat_count += 1
+            print(f"[WARNING] Repeated action detected ({repeat_count}x)")
+            if repeat_count >= 2:
+                # Force a "press return" if we're stuck on hotkeys/typing
+                if action.get("action") in ("hotkey", "type_text"):
+                    print("[LOOP BREAK] Forcing press return to unstick")
+                    action = {"action": "press", "key": "return"}
+                    repeat_count = 0
+                elif repeat_count >= 3:
+                    # Give up on this loop
+                    return GoalResult(
+                        success=False,
+                        result=f"Got stuck in a loop repeating: {action}",
+                        steps=step + 1
+                    )
+        else:
+            repeat_count = 0
 
         # Notify callback if provided
         if on_step:
@@ -226,14 +282,14 @@ def execute_goal(goal: str, max_steps: int = 20, on_step=None) -> GoalResult:
                 steps=step + 1
             )
 
-        # Convert model coordinates to screen coordinates for click actions
+        # Convert model coordinates to screen coordinates for click/move actions
         action_name = action.get("action")
         if action_name in ["click", "double_click", "right_click", "move_to", "drag_to"]:
             if "x" in action and "y" in action:
                 screen_x, screen_y = model_to_screen_coords(action["x"], action["y"], meta)
                 action["x"] = screen_x
                 action["y"] = screen_y
-                action["_coords_converted"] = True  # Mark as already converted
+                action["_coords_converted"] = True
 
         # Execute the action
         try:

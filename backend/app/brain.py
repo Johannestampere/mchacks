@@ -35,6 +35,37 @@ WAKE_PHRASES = [
 # Seconds of inactivity before requiring wake phrase again
 CONVERSATION_TIMEOUT = 30.0
 
+# Confirmation patterns (user confirming a proposed action)
+CONFIRMATION_PATTERNS = [
+    r"^yes\b", r"^yeah\b", r"^yep\b", r"^yup\b", r"^sure\b",
+    r"^ok\b", r"^okay\b", r"^do it\b", r"^go ahead\b", r"^please\b",
+    r"^go for it\b", r"^sounds good\b", r"^let's do it\b", r"^absolutely\b",
+]
+
+# Denial patterns (user rejecting a proposed action)
+DENIAL_PATTERNS = [
+    r"^no\b", r"^nope\b", r"^nah\b", r"^nevermind\b", r"^never mind\b",
+    r"^cancel\b", r"^don't\b", r"^stop\b", r"^wait\b", r"^hold on\b",
+]
+
+
+def _is_confirmation(text: str) -> bool:
+    """Check if the text is a confirmation of a pending action."""
+    text_lower = text.lower().strip()
+    for pattern in CONFIRMATION_PATTERNS:
+        if re.search(pattern, text_lower):
+            return True
+    return False
+
+
+def _is_denial(text: str) -> bool:
+    """Check if the text is a denial/cancellation of a pending action."""
+    text_lower = text.lower().strip()
+    for pattern in DENIAL_PATTERNS:
+        if re.search(pattern, text_lower):
+            return True
+    return False
+
 
 def _contains_wake_phrase(text: str) -> bool:
     """Check if the text contains a wake phrase."""
@@ -54,11 +85,20 @@ def _strip_wake_phrase(text: str) -> str:
 
 
 @dataclass
+class PendingAction:
+    """An action waiting for user confirmation."""
+    device_id: str
+    goal: str
+    task_type: str = "laptop"
+
+
+@dataclass
 class Conversation:
     """Maintains conversation history and activation state."""
     messages: list[dict] = field(default_factory=list)
     last_interaction: float = 0.0
     is_active: bool = False
+    pending_action: Optional[PendingAction] = None
 
     def add_user_message(self, content: str) -> None:
         self.messages.append({"role": "user", "content": content})
@@ -82,6 +122,7 @@ class Conversation:
     def clear(self) -> None:
         self.messages = []
         self.is_active = False
+        self.pending_action = None
 
     def check_active(self) -> bool:
         """Check if conversation is still active (within timeout)."""
@@ -89,6 +130,7 @@ class Conversation:
             return False
         if time.time() - self.last_interaction > CONVERSATION_TIMEOUT:
             self.is_active = False
+            self.pending_action = None
             return False
         return True
 
@@ -96,6 +138,18 @@ class Conversation:
         """Activate the conversation (wake phrase detected)."""
         self.is_active = True
         self.last_interaction = time.time()
+
+    def set_pending_action(self, action: PendingAction) -> None:
+        """Store an action awaiting user confirmation."""
+        self.pending_action = action
+
+    def get_pending_action(self) -> Optional[PendingAction]:
+        """Get the current pending action, if any."""
+        return self.pending_action
+
+    def clear_pending_action(self) -> None:
+        """Clear the pending action."""
+        self.pending_action = None
 
 
 @dataclass
@@ -127,11 +181,40 @@ class DeviceActionResponse:
     task_type: str = "laptop"
 
 
+@dataclass
+class TaskStatus:
+    """Current status of a device task."""
+    goal: str
+    device_id: str
+    status: str  # queued, started, in_progress, completed, failed
+    message: str = ""
+
+    def is_active(self) -> bool:
+        return self.status in ("queued", "started", "in_progress")
+
+    def summary_for_prompt(self) -> str:
+        """Format task status for inclusion in system prompt."""
+        if self.status == "queued":
+            return f"PENDING TASK: '{self.goal}' on {self.device_id} - waiting to start"
+        elif self.status == "started":
+            return f"ACTIVE TASK: '{self.goal}' on {self.device_id} - just started"
+        elif self.status == "in_progress":
+            progress = f" ({self.message})" if self.message else ""
+            return f"ACTIVE TASK: '{self.goal}' on {self.device_id} - in progress{progress}"
+        elif self.status == "completed":
+            result = f" - {self.message}" if self.message else ""
+            return f"COMPLETED TASK: '{self.goal}'{result}"
+        elif self.status == "failed":
+            error = f" - {self.message}" if self.message else ""
+            return f"FAILED TASK: '{self.goal}'{error}"
+        return ""
+
+
 BrainResponse = IgnoredResponse | SimpleResponse | DeviceActionResponse
 
 
-def _build_system_prompt(devices: list[Device]) -> str:
-    """Build the system prompt with available devices."""
+def _build_system_prompt(devices: list[Device], task_status: Optional[TaskStatus] = None) -> str:
+    """Build the system prompt with available devices and current task status."""
     device_descriptions = []
     for d in devices:
         device_descriptions.append(
@@ -139,6 +222,17 @@ def _build_system_prompt(devices: list[Device]) -> str:
         )
 
     devices_block = "\n".join(device_descriptions) if device_descriptions else "  (no devices available)"
+
+    # Build task status section
+    task_status_block = ""
+    if task_status:
+        task_status_block = f"""
+
+## Current Task Status:
+{task_status.summary_for_prompt()}
+
+If user asks about the task status, refer to this information.
+If a task is actively running, don't start new tasks on the same device."""
 
     return f"""You are an AI assistant built into smart glasses. You can see what the user sees and hear what they say. You help them with questions and can control their devices.
 
@@ -164,11 +258,16 @@ def _build_system_prompt(devices: list[Device]) -> str:
 ## Response Format:
 Respond with valid JSON only. No other text.
 
-For conversational responses (DEFAULT):
+For conversational responses (questions, greetings, information):
 {{"answer": "<your brief, natural response>"}}
 
-For device control (ONLY when explicitly requested):
-{{"answer": "<brief confirmation>", "device_id": "<device_id>", "goal": "<UI instruction>", "task_type": "<device type>"}}
+For proposing a device action - ALWAYS include proposed_action when user asks you to do something on a device:
+{{"answer": "Want me to open a new tab on your laptop?", "proposed_action": {{"device_id": "macbook-pro-1", "goal": "Open a new browser tab", "task_type": "laptop"}}}}
+
+## CRITICAL - When user asks for device actions:
+You MUST include the "proposed_action" field in your JSON response. This is REQUIRED.
+Example: User says "open youtube" -> You respond with BOTH an "answer" asking for confirmation AND a "proposed_action" object.
+DO NOT just ask "Want me to do that?" without the proposed_action field - the action details MUST be included.
 
 ## Device Control - What You Can Do:
 You control devices through a screen agent that clicks and navigates. It can:
@@ -183,7 +282,7 @@ It CANNOT: control hardware (volume, brightness), run commands, or access system
 - Greetings = conversational response, not an action
 - If you see something relevant to the user's question, use that context naturally
 - Never mention receiving or analyzing images - you just "see"
-- Output ONLY valid JSON"""
+- Output ONLY valid JSON{task_status_block}"""
 
 
 async def process_input(
@@ -191,6 +290,7 @@ async def process_input(
     frames: list[bytes],
     devices: list[Device],
     conversation: Optional[Conversation] = None,
+    task_status: Optional[TaskStatus] = None,
 ) -> BrainResponse:
     """
     Process user transcript and visual frames to determine intent.
@@ -200,6 +300,7 @@ async def process_input(
         frames: List of JPEG frames from the video stream (most recent last)
         devices: List of available devices the user can control
         conversation: Optional conversation history for context
+        task_status: Optional current task status for context
 
     Returns:
         IgnoredResponse if not activated,
@@ -229,10 +330,40 @@ async def process_input(
             conversation.add_assistant_message(answer)
         return SimpleResponse(answer=answer)
 
+    # Check if there's a pending action awaiting confirmation
+    if conversation and conversation.get_pending_action():
+        pending = conversation.get_pending_action()
+        print(f"[BRAIN] Pending action exists: {pending}")
+
+        if _is_confirmation(clean_transcript):
+            # User confirmed - execute the action
+            print(f"[BRAIN] User confirmed action with: {clean_transcript}")
+            answer = "On it."
+            conversation.add_user_message(transcript)
+            conversation.add_assistant_message(answer)
+            conversation.clear_pending_action()
+            return DeviceActionResponse(
+                answer=answer,
+                device_id=pending.device_id,
+                goal=pending.goal,
+                task_type=pending.task_type,
+            )
+
+        if _is_denial(clean_transcript):
+            # User denied - clear the pending action
+            answer = "Okay, nevermind."
+            conversation.add_user_message(transcript)
+            conversation.add_assistant_message(answer)
+            conversation.clear_pending_action()
+            return SimpleResponse(answer=answer)
+
+        # User said something else - clear pending action and process normally
+        conversation.clear_pending_action()
+
     if not OPENROUTER_API_KEY:
         raise RuntimeError("OPENROUTER_API_KEY environment variable is not set")
 
-    system_prompt = _build_system_prompt(devices)
+    system_prompt = _build_system_prompt(devices, task_status)
 
     # Build message content for current turn
     user_content: list = [{"type": "text", "text": clean_transcript}]
@@ -304,8 +435,9 @@ async def process_input(
             json_str = response_text[json_start:json_end]
             try:
                 result = json.loads(json_str)
+                print(f"[BRAIN] Parsed JSON: {result}")
             except json.JSONDecodeError:
-                pass
+                print(f"[BRAIN] JSON decode error for: {json_str}")
 
     if result is None:
         answer = response_text or "I didn't catch that. Could you try again?"
@@ -315,19 +447,23 @@ async def process_input(
             conversation.add_assistant_message(answer)
         return SimpleResponse(answer=answer)
 
-    # Check if this is a device action (has goal and device_id)
-    if "goal" in result and "device_id" in result:
-        answer = result.get("answer", "Okay, I'll do that.")
-        # Update conversation history
+    # Check if this is a proposed action (needs user confirmation)
+    if "proposed_action" in result:
+        proposed = result["proposed_action"]
+        answer = result.get("answer", "Want me to do that?")
+        print(f"[BRAIN] Storing pending action: {proposed}")
+
+        # Store the pending action for confirmation
         if conversation:
+            conversation.set_pending_action(PendingAction(
+                device_id=proposed.get("device_id", ""),
+                goal=proposed.get("goal", ""),
+                task_type=proposed.get("task_type", "laptop"),
+            ))
             conversation.add_user_message(transcript)
             conversation.add_assistant_message(answer)
-        return DeviceActionResponse(
-            answer=answer,
-            device_id=result["device_id"],
-            goal=result["goal"],
-            task_type=result.get("task_type", "laptop"),
-        )
+
+        return SimpleResponse(answer=answer)
 
     # Simple response
     answer = result.get("answer", "I'm here to help!")
@@ -343,6 +479,7 @@ async def process_transcript(
     latest_frame: Optional[bytes],
     devices: list[Device],
     conversation: Optional[Conversation] = None,
+    task_status: Optional[TaskStatus] = None,
 ) -> BrainResponse:
     """
     Simplified interface that takes a single frame instead of a list.
@@ -352,9 +489,10 @@ async def process_transcript(
         latest_frame: Most recent JPEG frame (or None if no video)
         devices: List of available devices
         conversation: Optional conversation history for context
+        task_status: Optional current task status for context
 
     Returns:
         BrainResponse (SimpleResponse or DeviceActionResponse)
     """
     frames = [latest_frame] if latest_frame else []
-    return await process_input(transcript, frames, devices, conversation)
+    return await process_input(transcript, frames, devices, conversation, task_status)

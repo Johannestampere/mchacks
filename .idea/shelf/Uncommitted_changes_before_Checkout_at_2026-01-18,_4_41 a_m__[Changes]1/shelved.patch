@@ -1,0 +1,116 @@
+Index: device_bridge/LAM.py
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.BaseRevisionTextPatchEP
+<+>import os\nimport json\nimport base64\nimport requests\nfrom dotenv import load_dotenv\nfrom controller import screenshot_for_model, execute_action, get_screen_size, model_to_screen_coords\nfrom data_shapes import GoalResult, HistoryEntry, DoneAction\n\nload_dotenv(\".env.local\")\nOPENROUTER_API_KEY = os.getenv(\"OPENROUTER_API_KEY\")\n\nSYSTEM_PROMPT = \"\"\"You are a macOS automation agent. You see a screenshot and must output the NEXT SINGLE ACTION.\n\nIMPORTANT: Carefully read all text labels in the screenshot before acting.\n\nAvailable actions:\n- {\"action\": \"click\", \"x\": int, \"y\": int}\n- {\"action\": \"double_click\", \"x\": int, \"y\": int}\n- {\"action\": \"right_click\", \"x\": int, \"y\": int}\n- {\"action\": \"type_text\", \"text\": \"string\"}\n- {\"action\": \"hotkey\", \"keys\": [\"cmd\", \"space\"]}\n- {\"action\": \"hotkey\", \"keys\": [\"cmd\", \"tab\"]}\n- {\"action\": \"hotkey\", \"keys\": [\"cmd\", \"`\"]}\n- {\"action\": \"press\", \"key\": \"return\"}\n- {\"action\": \"press\", \"key\": \"tab\"}\n- {\"action\": \"press\", \"key\": \"escape\"}\n- {\"action\": \"scroll\", \"clicks\": int}\n- {\"action\": \"move_to\", \"x\": int, \"y\": int}\n- {\"action\": \"wait\", \"seconds\": float}\n- {\"action\": \"done\", \"result\": \"description of what was accomplished\"}\n\nCRITICAL RULES:\n1. Output ONLY valid JSON, no other text\n2. READ the screenshot carefully - identify app names, window titles, labels, and any visible text\n3. Coordinates are in screenshot pixels (the image dimensions you see)\n4. Do NOT give up early - keep trying until the goal is achieved\n\nCHROME RULES:\n- use the shortcut command + option + n to access the searchbar\n\nFOCUS + SAFETY RULES (VERY IMPORTANT):\n5. Before typing anything, confirm the correct target is focused.\n   - If you intend to type shell commands, you MUST be in Terminal with a visible shell prompt.\n6. TERMINAL PROMPT GATING:\n   - You may ONLY type shell commands if you can SEE a terminal prompt like: '$', '%', '➜', or a path line.\n   - If you do NOT see a terminal prompt, do NOT type commands. Instead, open or focus Terminal first.\n7. If you see VS Code, do NOT assume it is a terminal. VS Code editors accept text and will break the demo.\n8. If typing ever appears in the wrong place, immediately recover:\n   - {\"action\":\"hotkey\",\"keys\":[\"cmd\",\"k\"]} to clear Terminal (only if Terminal is focused)\n   - or {\"action\":\"hotkey\",\"keys\":[\"cmd\",\"tab\"]} to switch apps\n   - or {\"action\":\"hotkey\",\"keys\":[\"cmd\",\"`\"]} to cycle windows of the current app\n\nTERMINAL MODE (use this whenever the goal involves Terminal commands):\n0) If we're already in a terminal, open a new terminal with {\"action\":\"hotkey\",\"keys\":[\"cmd\",\"n\"]}\nA) Ensure Terminal is active:\n   - If Terminal is not visible, open it via Spotlight:\n     1. {\"action\":\"hotkey\",\"keys\":[\"cmd\",\"space\"]}\n     2. {\"action\":\"wait\",\"seconds\":0.2}\n     3. {\"action\":\"type_text\",\"text\":\"Terminal\"}\n     4. {\"action\":\"press\",\"key\":\"return\"}\n     5. {\"action\":\"wait\",\"seconds\":1.0}\n   - If Terminal is visible but not focused, click inside the Terminal input line area OR use Cmd+Tab to focus it.\nB) Confirm prompt is visible (must see '$', '%', '➜', etc.). If not visible, do NOT type commands; keep focusing Terminal.\nC) Clear screen to remove noise:\n   - {\"action\":\"hotkey\",\"keys\":[\"cmd\",\"k\"]}\n   - {\"action\":\"wait\",\"seconds\":0.2}\nD) Run ONE command at a time:\n   - type the command, press Return, then wait 0.4 seconds.\nE) Use python3 only (never use python).\n\nRELIABLE TERMINAL EDITING RULES:\n- Use `nano` (NOT vim).\n- Save nano: Ctrl+O, Return. Exit: Ctrl+X.\n- Use absolute Desktop path: `cd ~/Desktop` (NOT `cd Desktop`).\n\nCOMMON TERMINAL CHECKS:\n- After cd: run `pwd`\n- To verify file: run `ls`\n- To run: `python3 code.py`\n\nIf you need to open a file from Desktop using GUI:\n- Only do so if the goal explicitly requires GUI. For terminal tasks, stay in Terminal Mode.\n\nNow output the next single action as JSON.\n\"\"\"\n\n\n\ndef get_next_action(goal: str, screenshot_b64: str, meta: dict, history: list[dict] = None) -> dict:\n\n    model_w, model_h = meta[\"model_w\"], meta[\"model_h\"]\n\n    # Build prompt with history context - tell model EXACT image dimensions\n    prompt_parts = [SYSTEM_PROMPT + f\"\\n\\nThe image you are viewing is EXACTLY {model_w}x{model_h} pixels. All coordinates MUST be within this range (0-{model_w-1} for x, 0-{model_h-1} for y).\\n\\n\"]\n\n    if history:\n        prompt_parts.append(\"Previous actions taken:\\n\")\n        for i, entry in enumerate(history):\n            prompt_parts.append(f\"{i + 1}. {json.dumps(entry['action'])}\\n\")\n        prompt_parts.append(\"\\n\")\n\n    prompt_parts.append(f\"Goal: {goal}\\n\\nCurrent screen state:\")\n\n    # Build content for OpenRouter\n    prompt = \"\".join(prompt_parts) + \"\\n\\nWhat is the next action? Output ONLY JSON.\"\n\n    response = requests.post(\n        url=\"https://openrouter.ai/api/v1/chat/completions\",\n        headers={\n            \"Authorization\": f\"Bearer {OPENROUTER_API_KEY}\",\n        },\n        json={\n            \"model\": \"google/gemini-2.0-flash-001\",\n            \"messages\": [\n                {\n                    \"role\": \"user\",\n                    \"content\": [\n                        {\"type\": \"text\", \"text\": prompt},\n                        {\"type\": \"image_url\", \"image_url\": {\"url\": f\"data:image/jpeg;base64,{screenshot_b64}\"}}\n                    ]\n                }\n            ]\n        }\n    )\n\n    result = response.json()\n\n    if \"error\" in result:\n        return {\"action\": \"done\", \"result\": f\"Failed: API error - {result['error']}\"}\n\n    if \"choices\" not in result:\n        return {\"action\": \"done\", \"result\": f\"Failed: Unexpected API response - {result}\"}\n\n    content_text = result[\"choices\"][0][\"message\"][\"content\"].strip()\n\n    # Parse JSON from response\n    try:\n        # Try to extract JSON from the response\n        # First try direct parse\n        try:\n            return json.loads(content_text.strip())\n        except json.JSONDecodeError:\n            pass\n\n        # Handle markdown code blocks anywhere in response\n        if \"```\" in content_text:\n            # Find JSON block\n            parts = content_text.split(\"```\")\n            for part in parts:\n                part = part.strip()\n                if part.startswith(\"json\"):\n                    part = part[4:].strip()\n                if part.startswith(\"{\"):\n                    try:\n                        return json.loads(part)\n                    except json.JSONDecodeError:\n                        continue\n\n        # Try to find raw JSON object in text\n        start = content_text.find(\"{\")\n        end = content_text.rfind(\"}\") + 1\n        if start != -1 and end > start:\n            json_str = content_text[start:end]\n            return json.loads(json_str)\n\n        raise json.JSONDecodeError(\"No JSON found\", content_text, 0)\n    except json.JSONDecodeError:\n        return {\"action\": \"done\", \"result\": f\"Failed: Could not parse model response: {content_text}\"}\n\n# Execute a goal by repeatedly passing actions\ndef execute_goal(goal: str, max_steps: int = 20, on_step=None) -> GoalResult:\n\n    history: list[HistoryEntry] = []\n\n    for step in range(max_steps):\n        # Get current screen state with metadata\n        current_screenshot, meta = screenshot_for_model()\n\n        # Ask model for next action\n        action = get_next_action(goal, current_screenshot, meta, [{\"action\": h.action, \"screenshot\": h.screenshot} for h in history])\n\n        print(f\"[STEP {step + 1}] {action}\")\n\n        # Notify callback if provided\n        if on_step:\n            on_step(step + 1, action, current_screenshot)\n\n        # Check if done\n        if action.get(\"action\") == \"done\":\n            return GoalResult(\n                success=\"Failed\" not in action.get(\"result\", \"\"),\n                result=action.get(\"result\", \"Completed\"),\n                steps=step + 1\n            )\n\n        # Convert model coordinates to screen coordinates for click actions\n        action_name = action.get(\"action\")\n        if action_name in [\"click\", \"double_click\", \"right_click\", \"move_to\", \"drag_to\"]:\n            if \"x\" in action and \"y\" in action:\n                screen_x, screen_y = model_to_screen_coords(action[\"x\"], action[\"y\"], meta)\n                action[\"x\"] = screen_x\n                action[\"y\"] = screen_y\n                action[\"_coords_converted\"] = True  # Mark as already converted\n\n        # Execute the action\n        try:\n            result_screenshot = execute_action(action)\n            history.append(HistoryEntry(\n                action=action,\n                screenshot=result_screenshot\n            ))\n        except Exception as e:\n            return GoalResult(\n                success=False,\n                result=f\"Action failed: {str(e)}\",\n                steps=step + 1\n            )\n\n    return GoalResult(\n        success=False,\n        result=f\"Reached max steps ({max_steps}) without completing goal\",\n        steps=max_steps\n    )
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/device_bridge/LAM.py b/device_bridge/LAM.py
+--- a/device_bridge/LAM.py	(revision 8b01bfa68ebd112400a3f0ab379ad5ed435d07bc)
++++ b/device_bridge/LAM.py	(date 1768728027775)
+@@ -5,18 +5,27 @@
+ from dotenv import load_dotenv
+ from controller import screenshot_for_model, execute_action, get_screen_size, model_to_screen_coords
+ from data_shapes import GoalResult, HistoryEntry, DoneAction
++from accessibility import get_ui_elements, format_elements_for_model, get_element_by_index
+ 
+ load_dotenv(".env.local")
+ OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+ 
+-SYSTEM_PROMPT = """You are a macOS automation agent. You see a screenshot and must output the NEXT SINGLE ACTION.
++SYSTEM_PROMPT = """You are a macOS automation agent. You see a screenshot AND a list of detected UI elements. Output the NEXT SINGLE ACTION.
+ 
+-IMPORTANT: Carefully read all text labels in the screenshot before acting.
++IMPORTANT: Use the UI element list when possible - it gives you exact clickable targets.
+ 
+ Available actions:
++
++PREFERRED - Click by element index (more reliable):
++- {"action": "click_element", "index": int}  -- Click the UI element by its index number
++- {"action": "double_click_element", "index": int}
++
++FALLBACK - Click by coordinates (use when element not in list):
+ - {"action": "click", "x": int, "y": int}
+ - {"action": "double_click", "x": int, "y": int}
+ - {"action": "right_click", "x": int, "y": int}
++
++Other actions:
+ - {"action": "type_text", "text": "string"}
+ - {"action": "hotkey", "keys": ["cmd", "space"]}
+ - {"action": "hotkey", "keys": ["cmd", "tab"]}
+@@ -86,13 +95,19 @@
+ 
+ 
+ 
+-def get_next_action(goal: str, screenshot_b64: str, meta: dict, history: list[dict] = None) -> dict:
++def get_next_action(goal: str, screenshot_b64: str, meta: dict, history: list[dict] = None, ui_elements: list = None, ui_elements_text: str = None) -> dict:
+ 
+     model_w, model_h = meta["model_w"], meta["model_h"]
+ 
+     # Build prompt with history context - tell model EXACT image dimensions
+     prompt_parts = [SYSTEM_PROMPT + f"\n\nThe image you are viewing is EXACTLY {model_w}x{model_h} pixels. All coordinates MUST be within this range (0-{model_w-1} for x, 0-{model_h-1} for y).\n\n"]
+ 
++    # Include UI elements from accessibility API
++    if ui_elements_text:
++        prompt_parts.append("## Detected UI Elements (from accessibility API):\n")
++        prompt_parts.append(ui_elements_text)
++        prompt_parts.append("\n\nUse click_element with the index number when possible. It's more reliable than guessing coordinates.\n\n")
++
+     if history:
+         prompt_parts.append("Previous actions taken:\n")
+         for i, entry in enumerate(history):
+@@ -171,13 +186,26 @@
+ def execute_goal(goal: str, max_steps: int = 20, on_step=None) -> GoalResult:
+ 
+     history: list[HistoryEntry] = []
++    current_elements = []  # Cache of current UI elements
+ 
+     for step in range(max_steps):
+         # Get current screen state with metadata
+         current_screenshot, meta = screenshot_for_model()
+ 
++        # Extract UI elements using accessibility API
++        app_name, current_elements = get_ui_elements()
++        ui_elements_text = format_elements_for_model(current_elements)
++        print(f"[STEP {step + 1}] App: {app_name}, Found {len(current_elements)} UI elements")
++
+         # Ask model for next action
+-        action = get_next_action(goal, current_screenshot, meta, [{"action": h.action, "screenshot": h.screenshot} for h in history])
++        action = get_next_action(
++            goal,
++            current_screenshot,
++            meta,
++            [{"action": h.action, "screenshot": h.screenshot} for h in history],
++            ui_elements=current_elements,
++            ui_elements_text=ui_elements_text
++        )
+ 
+         print(f"[STEP {step + 1}] {action}")
+ 
+@@ -193,9 +221,24 @@
+                 steps=step + 1
+             )
+ 
+-        # Convert model coordinates to screen coordinates for click actions
++        # Handle click_element action - convert to regular click using element coordinates
+         action_name = action.get("action")
+-        if action_name in ["click", "double_click", "right_click", "move_to", "drag_to"]:
++        if action_name in ["click_element", "double_click_element"]:
++            element_index = action.get("index")
++            element = get_element_by_index(current_elements, element_index)
++            if element:
++                # Use the element's screen coordinates directly
++                action["x"] = element.x
++                action["y"] = element.y
++                action["action"] = "click" if action_name == "click_element" else "double_click"
++                action["_from_element"] = element_index
++                print(f"[STEP {step + 1}] Resolved element [{element_index}] -> ({element.x}, {element.y})")
++            else:
++                print(f"[STEP {step + 1}] Warning: Element index {element_index} not found, skipping")
++                continue
++
++        # Convert model coordinates to screen coordinates for regular click actions
++        elif action_name in ["click", "double_click", "right_click", "move_to", "drag_to"]:
+             if "x" in action and "y" in action:
+                 screen_x, screen_y = model_to_screen_coords(action["x"], action["y"], meta)
+                 action["x"] = screen_x

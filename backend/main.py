@@ -21,7 +21,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
-from backend.app.brain import Conversation, DeviceActionResponse, IgnoredResponse, process_transcript
+from backend.app.brain import Conversation, DeviceActionResponse, IgnoredResponse, process_transcript, TaskStatus as BrainTaskStatus
 from backend.app.device_registry import DEVICES
 from backend.app.tts import stream_tts
 
@@ -32,6 +32,11 @@ REALTIME_TRANSCRIBE_URL = "wss://api.openai.com/v1/realtime?intent=transcription
 
 app = FastAPI()
 app.mount("/static", StaticFiles(directory="static"), name="static")
+
+# Connected devices registry: device_id -> WebSocket
+connected_devices: dict[str, WebSocket] = {}
+# Callbacks for status updates from devices: device_id -> callback function
+device_status_callbacks: dict[str, callable] = {}
 
 
 @app.get("/")
@@ -66,6 +71,31 @@ class PendingBinaryPayload:
     expected_byte_length: int
     format: Optional[str] = None
     rate: Optional[int] = None
+
+
+@dataclass
+class TaskStatus:
+    """Tracks the current device task status."""
+    goal: str
+    device_id: str
+    status: str = "queued"  # queued, started, in_progress, completed, failed
+    message: str = ""
+
+    def is_active(self) -> bool:
+        return self.status in ("queued", "started", "in_progress")
+
+    def summary(self) -> str:
+        if self.status == "queued":
+            return f"Task queued: {self.goal}"
+        elif self.status == "started":
+            return f"Task started: {self.goal}"
+        elif self.status == "in_progress":
+            return f"Task in progress: {self.goal} - {self.message}"
+        elif self.status == "completed":
+            return f"Task completed: {self.goal} - {self.message}"
+        elif self.status == "failed":
+            return f"Task failed: {self.goal} - {self.message}"
+        return ""
 
 
 def pcm16_peak(pcm_bytes: bytes) -> int:
@@ -221,6 +251,9 @@ async def ws_phone(websocket: WebSocket) -> None:
     # TTS lock to prevent overlapping speech
     tts_lock = asyncio.Lock()
 
+    # Current task status (if any)
+    current_task: Optional[TaskStatus] = None
+
     async def send_json(message: dict) -> None:
         await websocket.send_text(json.dumps(message))
 
@@ -248,14 +281,24 @@ async def ws_phone(websocket: WebSocket) -> None:
         await send_json({"type": "partial_transcript", "text": partial_text})
 
     async def on_final(transcript: str) -> None:
-        nonlocal partial_text
+        nonlocal partial_text, current_task
         partial_text = ""
         await send_json({"type": "final_transcript", "text": transcript})
 
         if not transcript.strip():
             return
 
-        response = await process_transcript(transcript, latest_jpeg_frame, DEVICES, conversation)
+        # Convert current task to brain task status for context
+        brain_task_status = None
+        if current_task:
+            brain_task_status = BrainTaskStatus(
+                goal=current_task.goal,
+                device_id=current_task.device_id,
+                status=current_task.status,
+                message=current_task.message,
+            )
+
+        response = await process_transcript(transcript, latest_jpeg_frame, DEVICES, conversation, brain_task_status)
 
         # If not activated (no wake phrase and conversation inactive), ignore
         if isinstance(response, IgnoredResponse):
@@ -267,18 +310,38 @@ async def ws_phone(websocket: WebSocket) -> None:
         asyncio.create_task(speak(response.answer))
 
         if isinstance(response, DeviceActionResponse):
+            current_task = TaskStatus(
+                goal=response.goal,
+                device_id=response.device_id,
+                status="queued"
+            )
             await send_status("queued", f"[{response.device_id}] {response.goal}")
 
-            # Call LAM endpoint
-            try:
-                async with httpx.AsyncClient() as client:
-                    await client.post(
-                        "http://localhost:8001/task",  # TODO: configure LAM endpoint
-                        json={"goal": response.goal, "type": "laptop_task"},
-                        timeout=10.0,
-                    )
-            except httpx.ConnectError:
-                await send_status("warning", "LAM endpoint not available")
+            # Status callback that updates task status and announces completion
+            async def on_task_status(status: str, message: str) -> None:
+                nonlocal current_task
+                if current_task:
+                    current_task.status = status
+                    current_task.message = message
+
+                    # Announce completion or failure via TTS
+                    if status == "completed":
+                        asyncio.create_task(speak(f"Done. {message[:100]}"))
+                    elif status == "failed":
+                        asyncio.create_task(speak(f"Task failed. {message[:50]}"))
+
+                await send_status(status, message)
+
+            # Send task to device via WebSocket
+            sent = await send_task_to_device(
+                response.device_id,
+                response.goal,
+                on_status=on_task_status
+            )
+            if not sent:
+                current_task.status = "failed"
+                current_task.message = "Device not connected"
+                await send_status("warning", f"Device {response.device_id} not connected")
 
     transcribe_task: Optional[asyncio.Task] = None
 
@@ -349,3 +412,73 @@ async def ws_phone(websocket: WebSocket) -> None:
             transcribe_task.cancel()
             with contextlib.suppress(Exception):
                 await transcribe_task
+
+
+@app.websocket("/ws/device")
+async def ws_device(websocket: WebSocket) -> None:
+    """WebSocket endpoint for device bridges (LAM) to connect."""
+    await websocket.accept()
+
+    device_id: Optional[str] = None
+
+    try:
+        while True:
+            message = await websocket.receive_text()
+            try:
+                data = json.loads(message)
+            except json.JSONDecodeError:
+                continue
+
+            msg_type = data.get("type", "")
+
+            # Device registration
+            if msg_type == "device_register":
+                device_id = data.get("device_id")
+                if device_id:
+                    connected_devices[device_id] = websocket
+                    print(f"[DEVICE] Registered: {device_id} ({data.get('platform', 'unknown')})")
+                    await websocket.send_text(json.dumps({
+                        "type": "registered",
+                        "device_id": device_id,
+                        "message": "Successfully registered"
+                    }))
+
+            # Status update from device
+            elif msg_type == "status_update":
+                dev_id = data.get("device_id", device_id)
+                callback = device_status_callbacks.get(dev_id)
+                if callback:
+                    await callback(data.get("status", ""), data.get("message", ""))
+                print(f"[DEVICE] {dev_id} status: {data.get('status')} - {data.get('message', '')[:100]}")
+
+            # Pong response
+            elif msg_type == "pong":
+                pass  # Keep-alive response
+
+    except WebSocketDisconnect:
+        pass
+    finally:
+        if device_id and device_id in connected_devices:
+            del connected_devices[device_id]
+            print(f"[DEVICE] Disconnected: {device_id}")
+        if device_id and device_id in device_status_callbacks:
+            del device_status_callbacks[device_id]
+
+
+async def send_task_to_device(device_id: str, goal: str, on_status: callable) -> bool:
+    """Send a task to a connected device. Returns True if sent successfully."""
+    if device_id not in connected_devices:
+        return False
+
+    ws = connected_devices[device_id]
+    device_status_callbacks[device_id] = on_status
+
+    try:
+        await ws.send_text(json.dumps({
+            "type": "laptop_task",
+            "goal": goal,
+        }))
+        return True
+    except Exception as e:
+        print(f"[DEVICE] Failed to send task to {device_id}: {e}")
+        return False

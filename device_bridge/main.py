@@ -25,14 +25,18 @@ async def handle_task(ws, task: LaptopTask):
     await send_status(ws, "started", f"Starting task: {task.goal}")
 
     try:
+        # Get the current event loop to schedule callbacks from the thread
+        loop = asyncio.get_running_loop()
+
         # Progress callback to stream updates back to backend
         def on_step(step_num, action, screenshot_b64):
-            asyncio.create_task(
-                send_status(ws, "in_progress", f"Step {step_num}: {action.get('action', 'unknown')}", screenshot_b64)
+            # Schedule the coroutine on the main event loop from the thread
+            asyncio.run_coroutine_threadsafe(
+                send_status(ws, "in_progress", f"Step {step_num}: {action.get('action', 'unknown')}", screenshot_b64),
+                loop
             )
 
         # Run the LAM in a thread to avoid blocking the event loop
-        loop = asyncio.get_event_loop()
         result = await loop.run_in_executor(None, lambda: execute_goal(task.goal, max_steps=20, on_step=on_step))
 
         if result.success:
