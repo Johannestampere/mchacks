@@ -7,6 +7,10 @@ const assistantBox = document.getElementById("assistantBox");
 const taskBox = document.getElementById("taskBox");
 const fpsInput = document.getElementById("fpsInput");
 const audioChunkMsInput = document.getElementById("audioChunkMsInput");
+const logBox = document.getElementById("logBox");
+const autoScrollLog = document.getElementById("autoScrollLog");
+const clearLogButton = document.getElementById("clearLogButton");
+
 
 let mediaStream = null;
 let websocket = null;
@@ -20,6 +24,27 @@ let pcmSendTimer = null;
 
 let pcmInputSampleRate = null;
 let pcmFloatBufferQueue = [];
+
+// TTS playback state
+let ttsAudioChunks = [];
+let ttsReceiving = false;
+let currentTtsAudio = null;
+
+function isNearBottom(el, thresholdPx = 40) {
+  return el.scrollHeight - el.scrollTop - el.clientHeight < thresholdPx;
+}
+
+function appendLog(text) {
+  if (!logBox) return;
+  const shouldStick = autoScrollLog?.checked && isNearBottom(logBox);
+  appendBox(logBox, text.endsWith("\n") ? text : text + "\n");
+  if (shouldStick) logBox.scrollTop = logBox.scrollHeight;
+}
+
+function fmtTs() {
+  const t = new Date();
+  return t.toISOString().split("T")[1].replace("Z", "");
+}
 
 function setStatus(text) {
   statusPill.textContent = text;
@@ -176,6 +201,7 @@ async function start() {
   websocket.onopen = async () => {
     sessionId = crypto.randomUUID();
     websocket.send(JSON.stringify({ type: "hello", session_id: sessionId, client: "iphone_web" }));
+    appendLog(`[${fmtTs()}] ws.open`);
 
     setStatus("streaming");
     startButton.disabled = true;
@@ -185,41 +211,112 @@ async function start() {
     startFrameStreaming();
   };
 
-  websocket.onmessage = (event) => {
-    let message;
+websocket.onmessage = (event) => {
+  // Handle text messages (JSON)
+  if (typeof event.data === "string") {
     try {
-      message = JSON.parse(event.data);
-    } catch {
-      return;
-    }
+      const message = JSON.parse(event.data);
+      appendLog(`[${fmtTs()}] ${message.type || "unknown"} ${JSON.stringify(message)}`);
 
-    if (message.type === "partial_transcript" || message.type === "final_transcript") {
-      replaceBox(transcriptBox, message.text || "");
-      return;
+      // TTS control messages
+      if (message.type === "tts_start") {
+        ttsReceiving = true;
+        ttsAudioChunks = [];
+        return;
+      }
+      if (message.type === "tts_end") {
+        ttsReceiving = false;
+        playTtsAudio();
+        return;
+      }
+
+      // Existing UI behavior:
+      if (message.type === "partial_transcript" || message.type === "final_transcript") {
+        replaceBox(transcriptBox, message.text || "");
+        return;
+      }
+      if (message.type === "assistant_text_delta") {
+        appendBox(assistantBox, message.delta || "");
+        return;
+      }
+      if (message.type === "assistant_text") {
+        replaceBox(assistantBox, message.text || "");
+        return;
+      }
+      if (message.type === "laptop_status") {
+        replaceBox(taskBox, `${message.state || ""}\n${message.message || ""}`.trim());
+        return;
+      }
+    } catch {
+      appendLog(`[${fmtTs()}] ws.text ${event.data}`);
     }
-    if (message.type === "assistant_text_delta") {
-      appendBox(assistantBox, message.delta || "");
-      return;
+    return;
+  }
+
+  // Handle binary messages (TTS audio chunks)
+  if (event.data instanceof ArrayBuffer) {
+    if (ttsReceiving) {
+      ttsAudioChunks.push(new Uint8Array(event.data));
+      appendLog(`[${fmtTs()}] tts_chunk (${event.data.byteLength} bytes)`);
+    } else {
+      appendLog(`[${fmtTs()}] ws.binary (${event.data?.byteLength ?? "?"} bytes)`);
     }
-    if (message.type === "assistant_text") {
-      replaceBox(assistantBox, message.text || "");
-      return;
-    }
-    if (message.type === "laptop_status") {
-      replaceBox(taskBox, `${message.state || ""}\n${message.message || ""}`.trim());
-      return;
-    }
-  };
+  }
+};
 
   websocket.onclose = () => {
-    setStatus("disconnected");
-    cleanup();
+  appendLog(`[${fmtTs()}] ws.close`);
+  setStatus("disconnected");
+  cleanup();
+};
+
+websocket.onerror = () => {
+  appendLog(`[${fmtTs()}] ws.error`);
+  setStatus("error");
+  cleanup();
+};
+}
+
+function playTtsAudio() {
+  if (ttsAudioChunks.length === 0) return;
+
+  // Combine all chunks into a single ArrayBuffer
+  const totalLength = ttsAudioChunks.reduce((acc, chunk) => acc + chunk.length, 0);
+  const combined = new Uint8Array(totalLength);
+  let offset = 0;
+  for (const chunk of ttsAudioChunks) {
+    combined.set(chunk, offset);
+    offset += chunk.length;
+  }
+  ttsAudioChunks = [];
+
+  // Create a blob and play it
+  const blob = new Blob([combined], { type: "audio/mpeg" });
+  const url = URL.createObjectURL(blob);
+
+  // Stop any currently playing TTS
+  if (currentTtsAudio) {
+    currentTtsAudio.pause();
+    currentTtsAudio = null;
+  }
+
+  const audio = new Audio(url);
+  currentTtsAudio = audio;
+
+  audio.onended = () => {
+    URL.revokeObjectURL(url);
+    currentTtsAudio = null;
   };
 
-  websocket.onerror = () => {
-    setStatus("error");
-    cleanup();
+  audio.onerror = () => {
+    URL.revokeObjectURL(url);
+    currentTtsAudio = null;
+    appendLog(`[${fmtTs()}] tts_playback_error`);
   };
+
+  audio.play().catch((e) => {
+    appendLog(`[${fmtTs()}] tts_play_failed: ${e.message}`);
+  });
 }
 
 function stop() {
@@ -264,8 +361,22 @@ function cleanup() {
   }
   mediaStream = null;
 
+  // Stop TTS playback
+  if (currentTtsAudio) {
+    currentTtsAudio.pause();
+    currentTtsAudio = null;
+  }
+  ttsAudioChunks = [];
+  ttsReceiving = false;
+
   websocket = null;
   sessionId = null;
+}
+
+if (clearLogButton) {
+  clearLogButton.addEventListener("click", () => {
+    if (logBox) logBox.textContent = "";
+  });
 }
 
 startButton.addEventListener("click", () => start().catch((e) => {

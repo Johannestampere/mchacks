@@ -3,6 +3,7 @@ from __future__ import annotations
 import ssl
 import certifi
 
+import array
 import asyncio
 import base64
 import contextlib
@@ -11,11 +12,15 @@ import os
 from dataclasses import dataclass
 from typing import Optional
 
+import httpx
 import websockets
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
-from openai import OpenAI
+
+from backend.app.brain import Conversation, DeviceActionResponse, process_transcript
+from backend.app.device_registry import DEVICES
+from backend.app.tts import stream_tts
 
 print("websockets version:", websockets.__version__)
 
@@ -23,20 +28,33 @@ OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 REALTIME_TRANSCRIBE_URL = "wss://api.openai.com/v1/realtime?intent=transcription"
 
 app = FastAPI()
-app.mount("/static", StaticFiles(directory="backend/static"), name="static")
-
-openai_client = OpenAI(api_key=OPENAI_API_KEY)
+app.mount("/static", StaticFiles(directory="static"), name="static")
 
 
 @app.get("/")
 def index() -> HTMLResponse:
-    with open("backend/static/index.html", "r", encoding="utf-8") as file_handle:
+    with open("static/index.html", "r", encoding="utf-8") as file_handle:
         return HTMLResponse(file_handle.read())
 
 
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.post("/test-brain")
+async def test_brain(text: str) -> dict:
+    """Test endpoint to try the brain without audio/video streaming."""
+    response = await process_transcript(text, None, DEVICES)
+    if isinstance(response, DeviceActionResponse):
+        return {
+            "type": "device_action",
+            "answer": response.answer,
+            "device_id": response.device_id,
+            "goal": response.goal,
+            "task_type": response.task_type,
+        }
+    return {"type": "simple", "answer": response.answer}
 
 
 @dataclass
@@ -47,40 +65,16 @@ class PendingBinaryPayload:
     rate: Optional[int] = None
 
 
-async def call_brain_model(user_text: str, latest_jpeg_frame: Optional[bytes]) -> dict:
-    content = [{"type": "text", "text": user_text}]
-    if latest_jpeg_frame is not None:
-        b64 = base64.b64encode(latest_jpeg_frame).decode("ascii")
-        content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
-
-    system_instructions = (
-        "You are a live conversational assistant. "
-        "If the user is asking you to perform an action on the laptop, respond with JSON: "
-        '{"type":"laptop_task","goal":"<single clear instruction>","confirmation_text":"<what to say>"} '
-        "Otherwise respond with JSON: "
-        '{"type":"answer","text":"<your response>"} '
-        "Return ONLY valid JSON."
-    )
-
-    response = openai_client.responses.create(
-        model="gpt-4o-mini",
-        input=[
-            {"role": "system", "content": system_instructions},
-            {"role": "user", "content": content},
-        ],
-    )
-
-    output_text = ""
-    for item in response.output:
-        if item.type == "message":
-            for part in item.content:
-                if part.type == "output_text":
-                    output_text += part.text
-
-    try:
-        return json.loads(output_text)
-    except json.JSONDecodeError:
-        return {"type": "answer", "text": output_text.strip() or "Sorry—could you repeat that?"}
+def pcm16_peak(pcm_bytes: bytes) -> int:
+    if len(pcm_bytes) < 2:
+        return 0
+    if len(pcm_bytes) % 2 == 1:
+        pcm_bytes = pcm_bytes[:-1]
+    samples = array.array("h")
+    samples.frombytes(pcm_bytes)
+    if not samples:
+        return 0
+    return max(abs(sample) for sample in samples)
 
 
 async def openai_transcription_worker(
@@ -92,59 +86,115 @@ async def openai_transcription_worker(
     if not OPENAI_API_KEY:
         raise RuntimeError("OPENAI_API_KEY is not set")
 
+    # IMPORTANT: remove the beta header so the server accepts the current session schema.
     headers = {
         "Authorization": f"Bearer {OPENAI_API_KEY}",
-        "OpenAI-Beta": "realtime=v1",
     }
+
+    ssl_context = ssl.create_default_context(cafile=certifi.where())
+
+    async def safe_send(ws, payload: dict) -> None:
+        await ws.send(json.dumps(payload))
+
+    async def recv_json(ws) -> Optional[dict]:
+        raw = await ws.recv()
+        if isinstance(raw, (bytes, bytearray)):
+            raw = raw.decode("utf-8", errors="ignore")
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError:
+            return None
 
     try:
         await send_status("info", "Connecting to OpenAI realtime transcription WS...")
-        ssl_context = ssl.create_default_context(cafile=certifi.where())
 
-        async with websockets.connect(REALTIME_TRANSCRIBE_URL, additional_headers=headers, ssl=ssl_context,) as ws:
+        async with websockets.connect(
+            REALTIME_TRANSCRIBE_URL,
+            additional_headers=headers,
+            ssl=ssl_context,
+        ) as ws:
             await send_status("info", "Connected to OpenAI realtime transcription WS")
 
-            await ws.send(json.dumps({
-                "type": "transcription_session.update",
-                "input_audio_format": "pcm16",
-                "input_audio_transcription": {
-                    "model": "gpt-4o-mini-transcribe",
-                    "language": "en"
+            # Wait for session.created before sending session.update (avoids early-boot errors).
+            try:
+                for _ in range(50):
+                    event = await asyncio.wait_for(recv_json(ws), timeout=5)
+                    if not event:
+                        continue
+                    event_type = event.get("type") or "unknown"
+                    await send_status("debug", f"OpenAI event: {event_type}")
+                    if event_type == "session.created":
+                        break
+                    if event_type == "error":
+                        await send_status("error", f"OpenAI error event: {json.dumps(event)}")
+            except asyncio.TimeoutError:
+                await send_status("debug", "Timed out waiting for session.created; continuing anyway")
+
+            # Minimal config fields that are actually needed for transcription.
+            await safe_send(
+                ws,
+                {
+                    "type": "session.update",
+                    "session": {
+                        "type": "transcription",
+                        "audio": {
+                            "input": {
+                                "format": {"type": "audio/pcm", "rate": 24000},
+                                "transcription": {"model": "gpt-4o-mini-transcribe", "language": "en"},
+                                "turn_detection": {"type": "server_vad"},
+                            }
+                        },
+                    },
                 },
-                "turn_detection": {
-                    "type": "server_vad",
-                    "threshold": 0.5,
-                    "prefix_padding_ms": 300,
-                    "silence_duration_ms": 500
-                }
-            }))
-            await send_status("info", "Sent transcription_session.update")
+            )
+            await send_status("info", "Sent session.update (transcription config)")
 
             async def sender() -> None:
                 while True:
                     pcm_bytes = await outgoing_audio_queue.get()
                     audio_b64 = base64.b64encode(pcm_bytes).decode("ascii")
-                    await ws.send(json.dumps({"type": "input_audio_buffer.append", "audio": audio_b64}))
+                    await safe_send(ws, {"type": "input_audio_buffer.append", "audio": audio_b64})
 
             async def receiver() -> None:
                 async for raw in ws:
+                    if isinstance(raw, (bytes, bytearray)):
+                        raw = raw.decode("utf-8", errors="ignore")
                     try:
                         event = json.loads(raw)
                     except json.JSONDecodeError:
                         continue
 
                     event_type = event.get("type") or "unknown"
-                    # TEMP DEBUG: show every event type arriving from OpenAI
                     await send_status("debug", f"OpenAI event: {event_type}")
+
+                    if event_type == "session.updated":
+                        await send_status("info", "OpenAI session.updated (config accepted)")
+                        continue
 
                     if event_type == "conversation.item.input_audio_transcription.delta":
                         await on_delta(event.get("delta") or "")
-                    elif event_type == "conversation.item.input_audio_transcription.completed":
-                        await on_final(event.get("transcript") or "")
-                    elif event_type == "error":
-                        await send_status("error", f"OpenAI error event: {json.dumps(event)}")
+                        continue
 
-            await asyncio.gather(sender(), receiver())
+                    if event_type == "conversation.item.input_audio_transcription.completed":
+                        await on_final(event.get("transcript") or "")
+                        continue
+
+                    if event_type == "error":
+                        await send_status("error", f"OpenAI error event: {json.dumps(event)}")
+                        continue
+
+            sender_task = asyncio.create_task(sender())
+            receiver_task = asyncio.create_task(receiver())
+            done, pending = await asyncio.wait(
+                {sender_task, receiver_task},
+                return_when=asyncio.FIRST_EXCEPTION,
+            )
+            for task in pending:
+                task.cancel()
+            for task in done:
+                exc = task.exception()
+                if exc:
+                    raise exc
 
     except Exception as e:
         await send_status("error", f"Realtime worker crashed: {type(e).__name__}: {e}")
@@ -160,13 +210,34 @@ async def ws_phone(websocket: WebSocket) -> None:
 
     audio_queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=50)
     partial_text: str = ""
+    audio_chunk_count = 0
+
+    # Conversation history for this session
+    conversation = Conversation()
+
+    # TTS lock to prevent overlapping speech
+    tts_lock = asyncio.Lock()
 
     async def send_json(message: dict) -> None:
         await websocket.send_text(json.dumps(message))
 
     async def send_status(state: str, message: str) -> None:
-        # state: info|debug|error|queued|streaming|idle
         await send_json({"type": "laptop_status", "state": state, "message": message})
+
+    async def speak(text: str) -> None:
+        """Stream TTS audio to the client, ensuring no overlapping speech."""
+        async with tts_lock:
+            try:
+                # Signal TTS start
+                await send_json({"type": "tts_start"})
+
+                async for chunk in stream_tts(text):
+                    await websocket.send_bytes(chunk)
+
+                # Signal TTS end
+                await send_json({"type": "tts_end"})
+            except Exception as e:
+                await send_status("error", f"TTS error: {e}")
 
     async def on_delta(delta: str) -> None:
         nonlocal partial_text
@@ -178,12 +249,28 @@ async def ws_phone(websocket: WebSocket) -> None:
         partial_text = ""
         await send_json({"type": "final_transcript", "text": transcript})
 
-        brain = await call_brain_model(transcript, latest_jpeg_frame)
-        if brain.get("type") == "laptop_task":
-            await send_json({"type": "assistant_text", "text": brain.get("confirmation_text") or "Okay."})
-            await send_status("queued", brain.get("goal") or "")
-        else:
-            await send_json({"type": "assistant_text", "text": brain.get("text") or ""})
+        if not transcript.strip():
+            return
+
+        response = await process_transcript(transcript, latest_jpeg_frame, DEVICES, conversation)
+        await send_json({"type": "assistant_text", "text": response.answer})
+
+        # Speak the response
+        asyncio.create_task(speak(response.answer))
+
+        if isinstance(response, DeviceActionResponse):
+            await send_status("queued", f"[{response.device_id}] {response.goal}")
+
+            # Call LAM endpoint
+            try:
+                async with httpx.AsyncClient() as client:
+                    await client.post(
+                        "http://localhost:8001/task",  # TODO: configure LAM endpoint
+                        json={"goal": response.goal, "device_type": response.task_type},
+                        timeout=10.0,
+                    )
+            except httpx.ConnectError:
+                await send_status("warning", "LAM endpoint not available")
 
     transcribe_task: Optional[asyncio.Task] = None
 
@@ -232,17 +319,23 @@ async def ws_phone(websocket: WebSocket) -> None:
 
                 if pending.payload_type == "video_frame":
                     latest_jpeg_frame = payload
+
                 elif pending.payload_type == "pcm_audio":
+                    audio_chunk_count += 1
+                    if audio_chunk_count % 50 == 0:
+                        peak = pcm16_peak(payload)
+                        await send_status("debug", f"pcm chunk bytes={len(payload)} peak={peak}")
+
                     if audio_queue.full():
                         with contextlib.suppress(Exception):
                             audio_queue.get_nowait()
                     await audio_queue.put(payload)
-                    print("pcm bytes:", len(payload))
 
                 pending = None
 
     except WebSocketDisconnect:
         return
+
     finally:
         if transcribe_task:
             transcribe_task.cancel()

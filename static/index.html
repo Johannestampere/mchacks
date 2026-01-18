@@ -55,7 +55,31 @@
       <div class="small">Laptop task status (from server)</div>
       <pre id="taskBox"></pre>
     </div>
+
+    <div class="logWrap">
+      <div class="logHeader">
+        <div class="small">Logs (all websocket messages)</div>
+        <div class="right small">
+          <label>
+            <input id="autoScrollLog" type="checkbox" checked>
+            Autoscroll
+          </label>
+          <button id="clearLogButton" type="button">Clear</button>
+        </div>
+      </div>
+      <pre id="logBox"></pre>
+    </div>
   </div>
+
+  <style>
+    .logWrap {display:flex;flex-direction:column;gap:8px;}
+    .logHeader {display:flex;gap:12px;align-items:center;flex-wrap:wrap;}
+    .logHeader .right {margin-left:auto;display:flex;gap:10px;align-items:center;}
+    #logBox {
+      max-height: 260px;
+      overflow-y: auto;
+    }
+  </style>
 
   <script src="/static/app.js"></script>
 </body>
