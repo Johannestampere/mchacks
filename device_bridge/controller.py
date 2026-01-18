@@ -28,70 +28,29 @@ def scale_coords(x: int, y: int) -> tuple[int, int]:
 
 
 def click(x: int, y: int):
-    scaled_x, scaled_y = scale_coords(x, y)
-    print(f"[DEBUG] click: image coords ({x}, {y}) -> screen coords ({scaled_x}, {scaled_y})")
-    # Use AppleScript for reliable clicking on macOS
-    cmd = f'tell application "System Events" to click at {{{scaled_x}, {scaled_y}}}'
-    result = subprocess.run(['osascript', '-e', cmd], capture_output=True, text=True)
-    if result.returncode != 0:
-        # Fallback to cliclick if available, or use Quartz
-        try:
-            from Quartz.CoreGraphics import CGEventCreateMouseEvent, CGEventPost, kCGEventLeftMouseDown, kCGEventLeftMouseUp, kCGHIDEventTap, kCGMouseButtonLeft
-            event = CGEventCreateMouseEvent(None, kCGEventLeftMouseDown, (scaled_x, scaled_y), kCGMouseButtonLeft)
-            CGEventPost(kCGHIDEventTap, event)
-            event = CGEventCreateMouseEvent(None, kCGEventLeftMouseUp, (scaled_x, scaled_y), kCGMouseButtonLeft)
-            CGEventPost(kCGHIDEventTap, event)
-            print(f"[DEBUG] click: used Quartz")
-        except ImportError:
-            pyautogui.click(scaled_x, scaled_y)
-            print(f"[DEBUG] click: used pyautogui fallback")
-    else:
-        print(f"[DEBUG] click: used AppleScript")
+    # x, y are already screen coords (converted by LAM.py)
+    print(f"[DEBUG] click: screen coords ({x}, {y})")
+    # Use cliclick for reliable clicking on macOS
+    result = subprocess.run(['cliclick', f'c:{x},{y}'], capture_output=True, text=True)
+    print(f"[DEBUG] click: cliclick result: {result.returncode}, stderr: {result.stderr}")
     print(f"[DEBUG] click: done")
 
 
 def double_click(x: int, y: int):
-    scaled_x, scaled_y = scale_coords(x, y)
-    print(f"[DEBUG] double_click: image coords ({x}, {y}) -> screen coords ({scaled_x}, {scaled_y})")
-    # Use Quartz for reliable double-clicking on macOS
-    try:
-        from Quartz.CoreGraphics import CGEventCreateMouseEvent, CGEventPost, CGEventSetIntegerValueField, kCGEventLeftMouseDown, kCGEventLeftMouseUp, kCGHIDEventTap, kCGMouseButtonLeft, kCGMouseEventClickState
-        import time as t
-        # First click
-        event = CGEventCreateMouseEvent(None, kCGEventLeftMouseDown, (scaled_x, scaled_y), kCGMouseButtonLeft)
-        CGEventSetIntegerValueField(event, kCGMouseEventClickState, 1)
-        CGEventPost(kCGHIDEventTap, event)
-        event = CGEventCreateMouseEvent(None, kCGEventLeftMouseUp, (scaled_x, scaled_y), kCGMouseButtonLeft)
-        CGEventSetIntegerValueField(event, kCGMouseEventClickState, 1)
-        CGEventPost(kCGHIDEventTap, event)
-        t.sleep(0.05)
-        # Second click
-        event = CGEventCreateMouseEvent(None, kCGEventLeftMouseDown, (scaled_x, scaled_y), kCGMouseButtonLeft)
-        CGEventSetIntegerValueField(event, kCGMouseEventClickState, 2)
-        CGEventPost(kCGHIDEventTap, event)
-        event = CGEventCreateMouseEvent(None, kCGEventLeftMouseUp, (scaled_x, scaled_y), kCGMouseButtonLeft)
-        CGEventSetIntegerValueField(event, kCGMouseEventClickState, 2)
-        CGEventPost(kCGHIDEventTap, event)
-        print(f"[DEBUG] double_click: used Quartz")
-    except ImportError:
-        pyautogui.doubleClick(scaled_x, scaled_y)
-        print(f"[DEBUG] double_click: used pyautogui fallback")
+    # x, y are already screen coords (converted by LAM.py)
+    print(f"[DEBUG] double_click: screen coords ({x}, {y})")
+    # Use cliclick for reliable double-clicking on macOS
+    result = subprocess.run(['cliclick', f'dc:{x},{y}'], capture_output=True, text=True)
+    print(f"[DEBUG] double_click: cliclick result: {result.returncode}, stderr: {result.stderr}")
     print(f"[DEBUG] double_click: done")
 
 
 def right_click(x: int, y: int):
-    scaled_x, scaled_y = scale_coords(x, y)
-    print(f"[DEBUG] right_click: image coords ({x}, {y}) -> screen coords ({scaled_x}, {scaled_y})")
-    try:
-        from Quartz.CoreGraphics import CGEventCreateMouseEvent, CGEventPost, kCGEventRightMouseDown, kCGEventRightMouseUp, kCGHIDEventTap, kCGMouseButtonRight
-        event = CGEventCreateMouseEvent(None, kCGEventRightMouseDown, (scaled_x, scaled_y), kCGMouseButtonRight)
-        CGEventPost(kCGHIDEventTap, event)
-        event = CGEventCreateMouseEvent(None, kCGEventRightMouseUp, (scaled_x, scaled_y), kCGMouseButtonRight)
-        CGEventPost(kCGHIDEventTap, event)
-        print(f"[DEBUG] right_click: used Quartz")
-    except ImportError:
-        pyautogui.rightClick(scaled_x, scaled_y)
-        print(f"[DEBUG] right_click: used pyautogui fallback")
+    # x, y are already screen coords (converted by LAM.py)
+    print(f"[DEBUG] right_click: screen coords ({x}, {y})")
+    # Use cliclick for reliable right-clicking on macOS
+    result = subprocess.run(['cliclick', f'rc:{x},{y}'], capture_output=True, text=True)
+    print(f"[DEBUG] right_click: cliclick result: {result.returncode}, stderr: {result.stderr}")
     print(f"[DEBUG] right_click: done")
 
 
@@ -212,17 +171,56 @@ def drag_to(x: int, y: int, duration: float = 0.5):
     scaled_x, scaled_y = scale_coords(x, y)
     pyautogui.dragTo(scaled_x, scaled_y, duration=duration)
 
+MODEL_IMAGE_WIDTH = 1280  # Fixed width for model to ensure consistent coordinates
+
 def screenshot() -> str:
+    """Legacy function - returns just base64"""
+    b64, _ = screenshot_for_model()
+    return b64
+
+def screenshot_for_model(max_width=MODEL_IMAGE_WIDTH) -> tuple[str, dict]:
+    """Returns resized screenshot and metadata for coordinate conversion"""
+    from PIL import Image
     print(f"[DEBUG] screenshot: capturing...")
     img = pyautogui.screenshot()
     print(f"[DEBUG] screenshot: captured image mode={img.mode}, size={img.size}")
     if img.mode == "RGBA":
         img = img.convert("RGB")
+
+    orig_w, orig_h = img.size
+
+    # Resize to fixed width for model (keep aspect ratio)
+    if orig_w > max_width:
+        new_h = int(orig_h * (max_width / orig_w))
+        model_img = img.resize((max_width, new_h), Image.LANCZOS)
+    else:
+        model_img = img
+
+    model_w, model_h = model_img.size
+
     buffer = BytesIO()
-    img.save(buffer, format="JPEG", quality=70)
+    model_img.save(buffer, format="JPEG", quality=70)
     b64 = base64.b64encode(buffer.getvalue()).decode("utf-8")
-    print(f"[DEBUG] screenshot: encoded, length={len(b64)}")
-    return b64
+
+    meta = {
+        "orig_w": orig_w, "orig_h": orig_h,
+        "model_w": model_w, "model_h": model_h,
+    }
+    print(f"[DEBUG] screenshot: original={orig_w}x{orig_h}, model={model_w}x{model_h}, encoded length={len(b64)}")
+    return b64, meta
+
+def model_to_screen_coords(x: int, y: int, meta: dict) -> tuple[int, int]:
+    """Convert model image coords -> screen coords (via original screenshot -> scaled)"""
+    # Model coords -> original screenshot coords
+    sx = meta["orig_w"] / meta["model_w"]
+    sy = meta["orig_h"] / meta["model_h"]
+    screenshot_x = int(round(x * sx))
+    screenshot_y = int(round(y * sy))
+
+    # Original screenshot coords -> screen coords (Retina scaling)
+    screen_x, screen_y = scale_coords(screenshot_x, screenshot_y)
+    print(f"[DEBUG] coord conversion: model({x},{y}) -> screenshot({screenshot_x},{screenshot_y}) -> screen({screen_x},{screen_y})")
+    return screen_x, screen_y
 
 def get_screen_size() -> tuple[int, int]:
     return pyautogui.size()

@@ -7,3 +7,4 @@ device_bridge/venv*
 backend/.env.local
 device_bridge/test_lam.py
 device_bridge/__pycache__
+device_bridge/test_click.py
