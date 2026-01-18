@@ -29,6 +29,23 @@ let pcmFloatBufferQueue = [];
 let ttsAudioChunks = [];
 let ttsReceiving = false;
 let currentTtsAudio = null;
+let ttsAudioElement = null;  // Persistent audio element for iOS
+
+// Initialize audio for iOS (must be called from user gesture)
+function initAudioForIOS() {
+  // Create a persistent audio element during user gesture
+  if (!ttsAudioElement) {
+    ttsAudioElement = new Audio();
+    ttsAudioElement.setAttribute("playsinline", "true");
+    ttsAudioElement.setAttribute("webkit-playsinline", "true");
+  }
+
+  // Play silent audio to unlock
+  ttsAudioElement.src = "data:audio/mp3;base64,SUQzBAAAAAAAI1RTU0UAAAAPAAADTGF2ZjU4Ljc2LjEwMAAAAAAAAAAAAAAA//tQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWGluZwAAAA8AAAACAAABhgC7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7//////////////////////////////////////////////////////////////////8AAAAATGF2YzU4LjEzAAAAAAAAAAAAAAAAJAAAAAAAAAAAAYYoRwmHAAAAAAD/+1DEAAAGAAGn9AAAIwAANP8AAARM//tQxB4AAADSAAAAAAAAANIAAAAASf/7UMQeAAADSAAAAAAAAANIAAAAAA==";
+  ttsAudioElement.play().then(() => {
+    appendLog(`[${fmtTs()}] audio_initialized`);
+  }).catch(() => {});
+}
 
 function isNearBottom(el, thresholdPx = 40) {
   return el.scrollHeight - el.scrollTop - el.clientHeight < thresholdPx;
@@ -178,6 +195,9 @@ function startFrameStreaming() {
 }
 
 async function start() {
+  // Initialize audio for iOS (must happen during user gesture)
+  initAudioForIOS();
+
   transcriptBox.textContent = "";
   assistantBox.textContent = "";
   taskBox.textContent = "";
@@ -290,31 +310,37 @@ function playTtsAudio() {
   }
   ttsAudioChunks = [];
 
-  // Create a blob and play it
+  appendLog(`[${fmtTs()}] tts_playing (${totalLength} bytes)`);
+
+  // Create a blob URL
   const blob = new Blob([combined], { type: "audio/mpeg" });
   const url = URL.createObjectURL(blob);
 
-  // Stop any currently playing TTS
-  if (currentTtsAudio) {
-    currentTtsAudio.pause();
-    currentTtsAudio = null;
-  }
-
-  const audio = new Audio(url);
+  // Use the persistent audio element (for iOS compatibility)
+  const audio = ttsAudioElement || new Audio();
   currentTtsAudio = audio;
 
+  // Clean up previous URL if any
+  if (audio._lastUrl) {
+    URL.revokeObjectURL(audio._lastUrl);
+  }
+  audio._lastUrl = url;
+
+  audio.src = url;
+
   audio.onended = () => {
-    URL.revokeObjectURL(url);
     currentTtsAudio = null;
+    appendLog(`[${fmtTs()}] tts_ended`);
   };
 
   audio.onerror = () => {
-    URL.revokeObjectURL(url);
     currentTtsAudio = null;
     appendLog(`[${fmtTs()}] tts_playback_error`);
   };
 
-  audio.play().catch((e) => {
+  audio.play().then(() => {
+    appendLog(`[${fmtTs()}] tts_play_started`);
+  }).catch((e) => {
     appendLog(`[${fmtTs()}] tts_play_failed: ${e.message}`);
   });
 }
