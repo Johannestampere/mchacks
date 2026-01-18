@@ -5,3 +5,5 @@ device_bridge/venv*
 .env
 *env*
 backend/.env.local
+device_bridge/test_lam.py
+device_bridge/__pycache__

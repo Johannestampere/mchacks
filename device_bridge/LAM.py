@@ -1,17 +1,17 @@
 import os
 import json
 import base64
-from google import genai
+import requests
+from dotenv import load_dotenv
 from controller import screenshot, execute_action, get_screen_size
 from data_shapes import GoalResult, HistoryEntry, DoneAction
-from PIL import Image
-from io import BytesIO
 
-client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+load_dotenv(".env.local")
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 
-SYSTEM_PROMPT = """You are a macOS automation agent. You receive a goal and a screenshot of the current screen state.
+SYSTEM_PROMPT = """You are a macOS automation agent. You see a screenshot and must output the NEXT SINGLE ACTION.
 
-Your job is to output the NEXT SINGLE ACTION to take toward completing the goal.
+IMPORTANT: Look at the screenshot carefully to understand the CURRENT state before deciding your action.
 
 Available actions:
 - {"action": "click", "x": int, "y": int}
@@ -20,28 +20,25 @@ Available actions:
 - {"action": "type_text", "text": "string"}
 - {"action": "hotkey", "keys": ["cmd", "space"]}
 - {"action": "press", "key": "return"}
-- {"action": "scroll", "clicks": int}  # positive=up, negative=down
+- {"action": "scroll", "clicks": int}
 - {"action": "move_to", "x": int, "y": int}
 - {"action": "wait", "seconds": float}
 - {"action": "done", "result": "description of what was accomplished"}
 
-Rules:
-1. Output ONLY valid JSON, nothing else
-2. Output ONE action at a time
-3. Use exact pixel coordinates from the screenshot
-4. When the goal is complete, output {"action": "done", "result": "..."}
-5. If you cannot complete the goal, output {"action": "done", "result": "Failed: reason"}
+CRITICAL RULES:
+1. Output ONLY valid JSON, no other text
+2. Look at the screenshot - what do you SEE right now?
+3. If Spotlight is open with text typed, press return to launch the app
+4. If an app is open, interact with it directly
+5. Coordinates are in screenshot pixels (the image you see)
 
-Common patterns:
-- Open Spotlight: {"action": "hotkey", "keys": ["cmd", "space"]}
-- Open app: hotkey spotlight, type app name, press return
-- Click button: identify coordinates from screenshot, click
-- Type in field: click field first, then type_text
+Step-by-step patterns:
+- To open an app:
+  1. {"action": "hotkey", "keys": ["cmd", "space"]} - opens Spotlight
+  2. {"action": "type_text", "text": "AppName"} - type the app name
+  3. {"action": "press", "key": "return"} - MUST press return to launch!
+- To use Calculator: type numbers and operators directly, e.g. "2+2", then press return for result
 """
-
-def b64_to_pil(b64_string: str) -> Image.Image:
-    img_data = base64.b64decode(b64_string)
-    return Image.open(BytesIO(img_data))
 
 def get_next_action(goal: str, screenshot_b64: str, history: list[dict] = None) -> dict:
 
@@ -58,26 +55,69 @@ def get_next_action(goal: str, screenshot_b64: str, history: list[dict] = None) 
 
     prompt_parts.append(f"Goal: {goal}\n\nCurrent screen state:")
 
-    # Convert screenshot to PIL Image
-    current_image = b64_to_pil(screenshot_b64)
-
-    # Build content for Gemini
+    # Build content for OpenRouter
     prompt = "".join(prompt_parts) + "\n\nWhat is the next action? Output ONLY JSON."
 
-    response = client.models.generate_content(
-        model="gemini-2.0-flash",
-        contents=[prompt, current_image]
+    response = requests.post(
+        url="https://openrouter.ai/api/v1/chat/completions",
+        headers={
+            "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        },
+        json={
+            "model": "google/gemini-2.0-flash-001",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{screenshot_b64}"}}
+                    ]
+                }
+            ]
+        }
     )
-    content_text = response.text.strip()
+
+    result = response.json()
+
+    if "error" in result:
+        return {"action": "done", "result": f"Failed: API error - {result['error']}"}
+
+    if "choices" not in result:
+        return {"action": "done", "result": f"Failed: Unexpected API response - {result}"}
+
+    content_text = result["choices"][0]["message"]["content"].strip()
 
     # Parse JSON from response
     try:
-        # Handle potential markdown code blocks
-        if content_text.startswith("```"):
-            content_text = content_text.split("```")[1]
-            if content_text.startswith("json"):
-                content_text = content_text[4:]
-        return json.loads(content_text.strip())
+        # Try to extract JSON from the response
+        # First try direct parse
+        try:
+            return json.loads(content_text.strip())
+        except json.JSONDecodeError:
+            pass
+
+        # Handle markdown code blocks anywhere in response
+        if "```" in content_text:
+            # Find JSON block
+            parts = content_text.split("```")
+            for part in parts:
+                part = part.strip()
+                if part.startswith("json"):
+                    part = part[4:].strip()
+                if part.startswith("{"):
+                    try:
+                        return json.loads(part)
+                    except json.JSONDecodeError:
+                        continue
+
+        # Try to find raw JSON object in text
+        start = content_text.find("{")
+        end = content_text.rfind("}") + 1
+        if start != -1 and end > start:
+            json_str = content_text[start:end]
+            return json.loads(json_str)
+
+        raise json.JSONDecodeError("No JSON found", content_text, 0)
     except json.JSONDecodeError:
         return {"action": "done", "result": f"Failed: Could not parse model response: {content_text}"}
 

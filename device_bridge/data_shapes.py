@@ -41,7 +41,8 @@ class PongMessage:
     def to_json(self) -> str:
         return json.dumps(asdict(self))
 
-
+# Can just be
+# { "type": "laptop_task", "goal": "Check code for errors and fix the errors."}
 @dataclass
 class LaptopTask:
     goal: str
