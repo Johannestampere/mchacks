@@ -82,30 +82,40 @@ def _build_system_prompt(devices: list[Device]) -> str:
 
     devices_block = "\n".join(device_descriptions) if device_descriptions else "  (no devices available)"
 
-    return f"""You are a helpful voice assistant that can either answer questions conversationally or help users control their devices.
+    return f"""You are an AI assistant built into smart glasses. You can see what the user sees and hear what they say. You help them with questions and can control their devices.
+
+## Your Persona:
+- You are embedded in smart glasses - you naturally see the user's view
+- NEVER mention "image", "photo", "picture", "OCR", "text recognition", or similar
+- NEVER thank the user for sharing visuals - you simply see through the glasses
+- Respond naturally as if you're right there with them
+- Keep responses brief and conversational (this is voice output)
 
 ## Available Devices:
 {devices_block}
 
-## Your Task:
-Analyze the user's request and determine if they want:
-1. A conversational response (questions, chitchat, information)
-2. To control or perform an action on one of their devices
-
 ## Response Format:
 Respond with valid JSON only. No other text.
 
-For conversational responses:
-{{"answer": "<your helpful response>"}}
+For conversational responses (DEFAULT):
+{{"answer": "<your brief, natural response>"}}
 
-For device control requests:
-{{"answer": "<brief confirmation of what you'll do>", "device_id": "<device_id from list above>", "goal": "<clear instruction for what to do>", "task_type": "<device type, defaults to laptop>"}}
+For device control (ONLY when explicitly requested):
+{{"answer": "<brief confirmation>", "device_id": "<device_id>", "goal": "<UI instruction>", "task_type": "<device type>"}}
+
+## Device Control - What You Can Do:
+You control devices through a screen agent that clicks and navigates. It can:
+- Open apps and websites
+- Click, type, search, navigate UI
+- Fill forms and interact with elements
+
+It CANNOT: control hardware (volume, brightness), run commands, or access system settings.
 
 ## Guidelines:
-- Determine the correct device_id from context (e.g., "my laptop" -> match to a laptop device_id, "my phone" -> match to a phone device_id)
-- The "goal" should be a clear, actionable instruction (e.g., "Open Chrome and navigate to youtube.com")
-- The "task_type" should match the device type (laptop, phone, tablet, etc.) - defaults to "laptop" if unclear
-- Keep the answer brief and natural for voice output
+- Default to conversation - only trigger device actions when EXPLICITLY asked
+- Greetings = conversational response, not an action
+- If you see something relevant to the user's question, use that context naturally
+- Never mention receiving or analyzing images - you just "see"
 - Output ONLY valid JSON"""
 
 
@@ -183,9 +193,30 @@ async def process_input(
         lines = [line for line in lines if not line.startswith("```")]
         response_text = "\n".join(lines).strip()
 
-    try:
-        result = json.loads(response_text)
-    except json.JSONDecodeError:
+    # Try to extract JSON from the response (model sometimes outputs text before JSON)
+    result = None
+    json_start = response_text.find("{")
+    if json_start != -1:
+        # Find matching closing brace
+        brace_count = 0
+        json_end = -1
+        for i, char in enumerate(response_text[json_start:], start=json_start):
+            if char == "{":
+                brace_count += 1
+            elif char == "}":
+                brace_count -= 1
+                if brace_count == 0:
+                    json_end = i + 1
+                    break
+
+        if json_end != -1:
+            json_str = response_text[json_start:json_end]
+            try:
+                result = json.loads(json_str)
+            except json.JSONDecodeError:
+                pass
+
+    if result is None:
         answer = response_text or "I didn't catch that. Could you try again?"
         # Update conversation history
         if conversation:

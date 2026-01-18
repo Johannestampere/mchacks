@@ -4,14 +4,10 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="18a7c257-028e-45cc-a60e-bcea634aeeff" name="Changes" comment="Updated project structure">
-      <change beforePath="$PROJECT_DIR$/.idea/misc.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/misc.xml" afterDir="false" />
+    <list default="true" id="18a7c257-028e-45cc-a60e-bcea634aeeff" name="Changes" comment="Added AI Brain, TTS, and updated front end.">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/backend/app/brain.py" beforeDir="false" afterPath="$PROJECT_DIR$/backend/app/brain.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/backend/app/device_registry.py" beforeDir="false" afterPath="$PROJECT_DIR$/backend/app/device_registry.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/backend/main.py" beforeDir="false" afterPath="$PROJECT_DIR$/backend/main.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/static/app.js" beforeDir="false" afterPath="$PROJECT_DIR$/static/app.js" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/static/index.html" beforeDir="false" afterPath="$PROJECT_DIR$/static/index.html" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -98,13 +94,22 @@
       <option name="project" value="LOCAL" />
       <updated>1768692467069</updated>
     </task>
-    <option name="localTasksCounter" value="4" />
+    <task id="LOCAL-00004" summary="Added AI Brain, TTS, and updated front end.">
+      <option name="closed" value="true" />
+      <created>1768722596628</created>
+      <option name="number" value="00004" />
+      <option name="presentableId" value="LOCAL-00004" />
+      <option name="project" value="LOCAL" />
+      <updated>1768722596628</updated>
+    </task>
+    <option name="localTasksCounter" value="5" />
     <servers />
   </component>
   <component name="VcsManagerConfiguration">
     <MESSAGE value="Base Project - Video streaming" />
     <MESSAGE value="Base Project - Video streaming, permissions, ai transcript not yet working." />
     <MESSAGE value="Updated project structure" />
-    <option name="LAST_COMMIT_MESSAGE" value="Updated project structure" />
+    <MESSAGE value="Added AI Brain, TTS, and updated front end." />
+    <option name="LAST_COMMIT_MESSAGE" value="Added AI Brain, TTS, and updated front end." />
   </component>
 </project>
