@@ -90,19 +90,60 @@ def get_next_action(goal: str, screenshot_b64: str, meta: dict, history: list[di
 
     model_w, model_h = meta["model_w"], meta["model_h"]
 
-    # Build prompt with history context - tell model EXACT image dimensions
-    prompt_parts = [SYSTEM_PROMPT + f"\n\nThe image you are viewing is EXACTLY {model_w}x{model_h} pixels. All coordinates MUST be within this range (0-{model_w-1} for x, 0-{model_h-1} for y).\n\n"]
+    # Build system message with dimensions
+    system_content = SYSTEM_PROMPT + f"\n\nThe image you are viewing is EXACTLY {model_w}x{model_h} pixels. All coordinates MUST be within this range (0-{model_w-1} for x, 0-{model_h-1} for y)."
 
-    if history:
-        prompt_parts.append("Previous actions taken:\n")
+    # Build multi-turn conversation with screenshots after each action
+    messages = []
+
+    # First message: goal + initial screenshot (or current if no history)
+    if history and len(history) > 0:
+        # Show the first screenshot with the goal
+        first_entry = history[0]
+        messages.append({
+            "role": "user",
+            "content": [
+                {"type": "text", "text": f"{system_content}\n\nGoal: {goal}\n\nHere is the current screen. What is the next action?"},
+                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{first_entry['screenshot']}"}}
+            ]
+        })
+
+        # Add each action and its resulting screenshot
         for i, entry in enumerate(history):
-            prompt_parts.append(f"{i + 1}. {json.dumps(entry['action'])}\n")
-        prompt_parts.append("\n")
+            # Assistant's action
+            messages.append({
+                "role": "assistant",
+                "content": json.dumps(entry['action'])
+            })
 
-    prompt_parts.append(f"Goal: {goal}\n\nCurrent screen state:")
+            # Show the result (next screenshot) - skip last one, we'll show current instead
+            if i < len(history) - 1:
+                next_entry = history[i + 1]
+                messages.append({
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "Action executed. Here is the result. What is the next action?"},
+                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{next_entry['screenshot']}"}}
+                    ]
+                })
 
-    # Build content for OpenRouter
-    prompt = "".join(prompt_parts) + "\n\nWhat is the next action? Output ONLY JSON."
+        # Final message: current screenshot after last action
+        messages.append({
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "Action executed. Here is the result. What is the next action?"},
+                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{screenshot_b64}"}}
+            ]
+        })
+    else:
+        # No history - just show current screenshot with goal
+        messages.append({
+            "role": "user",
+            "content": [
+                {"type": "text", "text": f"{system_content}\n\nGoal: {goal}\n\nHere is the current screen. What is the next action?"},
+                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{screenshot_b64}"}}
+            ]
+        })
 
     response = requests.post(
         url="https://openrouter.ai/api/v1/chat/completions",
@@ -111,15 +152,7 @@ def get_next_action(goal: str, screenshot_b64: str, meta: dict, history: list[di
         },
         json={
             "model": "google/gemini-2.0-flash-001",
-            "messages": [
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": prompt},
-                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{screenshot_b64}"}}
-                    ]
-                }
-            ]
+            "messages": messages
         }
     )
 
@@ -176,7 +209,7 @@ def execute_goal(goal: str, max_steps: int = 20, on_step=None) -> GoalResult:
         # Get current screen state with metadata
         current_screenshot, meta = screenshot_for_model()
 
-        # Ask model for next action
+        # Ask model for next action (pass screenshot that model sees when choosing action)
         action = get_next_action(goal, current_screenshot, meta, [{"action": h.action, "screenshot": h.screenshot} for h in history])
 
         print(f"[STEP {step + 1}] {action}")
@@ -204,10 +237,11 @@ def execute_goal(goal: str, max_steps: int = 20, on_step=None) -> GoalResult:
 
         # Execute the action
         try:
-            result_screenshot = execute_action(action)
+            execute_action(action)
+            # Store the screenshot that was shown to the model when it chose this action
             history.append(HistoryEntry(
                 action=action,
-                screenshot=result_screenshot
+                screenshot=current_screenshot
             ))
         except Exception as e:
             return GoalResult(

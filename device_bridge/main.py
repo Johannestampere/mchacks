@@ -6,7 +6,7 @@ from data_shapes import DeviceRegistration, StatusUpdate, PongMessage, LaptopTas
 
 # Configuration
 BACKEND_URL = "ws://localhost:8000/ws/device"
-DEVICE_ID = "macbook-1"
+DEVICE_ID = "laptop-1"
 RECONNECT_DELAY = 5
 
 async def send_status(ws, status: str, message: str = "", screenshot: str = None):
