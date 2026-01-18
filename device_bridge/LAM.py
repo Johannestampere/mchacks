@@ -36,7 +36,7 @@ CRITICAL RULES:
 4. Do NOT give up early - keep trying until the goal is achieved
 
 CHROME RULES:
-- use 
+- use the shortcut command + option + n to access the searchbar
 
 FOCUS + SAFETY RULES (VERY IMPORTANT):
 5. Before typing anything, confirm the correct target is focused.
