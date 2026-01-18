@@ -1,67 +1,74 @@
 import asyncio
-import json
 import websockets
 import platform
-import uuid
+from LAM import execute_goal
+from data_shapes import DeviceRegistration, StatusUpdate, PongMessage, LaptopTask
 
 # Configuration
 BACKEND_URL = "ws://localhost:8000/ws/device"
 DEVICE_ID = "macbook-1"
 RECONNECT_DELAY = 5
 
-# 
 async def send_status(ws, status: str, message: str = "", screenshot: str = None):
-    payload = {
-        "type": "status_update",
-        "device_id": DEVICE_ID,
-        "status": status,
-        "message": message,
-    }
-    if screenshot:
-        payload["screenshot"] = screenshot
-    await ws.send(json.dumps(payload))
+    update = StatusUpdate(
+        device_id=DEVICE_ID,
+        status=status,
+        message=message,
+        screenshot=screenshot,
+    )
+    await ws.send(update.to_json())
 
 # Handle incoming laptop_task
-async def handle_task(ws, task: dict):
-    goal = task.get("goal", "")
-    print(f"[TASK] Received goal: {goal}")
+async def handle_task(ws, task: LaptopTask):
+    print(f"[TASK] Received goal: {task.goal}")
 
-    await send_status(ws, "started", f"Starting task: {goal}")
+    await send_status(ws, "started", f"Starting task: {task.goal}")
 
     try:
-        # TODO: Use interpreter to break goal into steps
-        # TODO: Use controller to execute actions
+        # Progress callback to stream updates back to backend
+        def on_step(step_num, action, screenshot_b64):
+            asyncio.create_task(
+                send_status(ws, "in_progress", f"Step {step_num}: {action.get('action', 'unknown')}", screenshot_b64)
+            )
 
-        await send_status(ws, "in_progress", "Executing actions...")
-        await asyncio.sleep(1)  # Placeholder
-        await send_status(ws, "completed", f"Finished: {goal}")
+        # Run the LAM in a thread to avoid blocking the event loop
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(None, lambda: execute_goal(task.goal, max_steps=20, on_step=on_step))
+
+        if result.success:
+            await send_status(ws, "completed", result.result)
+        else:
+            await send_status(ws, "failed", result.result)
 
     except Exception as e:
         await send_status(ws, "failed", f"Error: {str(e)}")
 
 # Register device with backend
 async def register_device(ws):
-    await ws.send(json.dumps({
-        "type": "device_register",
-        "device_id": DEVICE_ID,
-        "device_type": "laptop",
-        "platform": platform.system(),
-        "capabilities": ["mouse", "keyboard", "screenshot"],
-    }))
+    registration = DeviceRegistration(
+        device_id=DEVICE_ID,
+        device_type="laptop",
+        platform=platform.system(),
+        capabilities=["mouse", "keyboard", "screenshot"],
+    )
+    await ws.send(registration.to_json())
     print(f"[REGISTER] Registered as device: {DEVICE_ID}")
 
 async def listen(ws):
+    import json
     async for message in ws:
         try:
             data = json.loads(message)
             msg_type = data.get("type", "")
 
             if msg_type == "laptop_task":
-                await handle_task(ws, data)
+                task = LaptopTask.from_dict(data)
+                await handle_task(ws, task)
             elif msg_type == "cancel":
                 print("[CANCEL] Task cancellation requested")
             elif msg_type == "ping":
-                await ws.send(json.dumps({"type": "pong", "device_id": DEVICE_ID}))
+                pong = PongMessage(device_id=DEVICE_ID)
+                await ws.send(pong.to_json())
             else:
                 print(f"[MSG] Unknown message type: {msg_type}")
 

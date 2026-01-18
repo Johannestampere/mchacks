@@ -1,4 +1,5 @@
 websockets
 pyautogui
 Pillow
-google-generativeai
+google-genai
+

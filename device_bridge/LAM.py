@@ -1,13 +1,13 @@
 import os
 import json
 import base64
-import google.generativeai as genai
+from google import genai
 from controller import screenshot, execute_action, get_screen_size
+from data_shapes import GoalResult, HistoryEntry, DoneAction
 from PIL import Image
 from io import BytesIO
 
-genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
-model = genai.GenerativeModel("gemini-2.0-flash")
+client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
 SYSTEM_PROMPT = """You are a macOS automation agent. You receive a goal and a screenshot of the current screen state.
 
@@ -62,9 +62,12 @@ def get_next_action(goal: str, screenshot_b64: str, history: list[dict] = None) 
     current_image = b64_to_pil(screenshot_b64)
 
     # Build content for Gemini
-    content = ["".join(prompt_parts), current_image, "\n\nWhat is the next action? Output ONLY JSON."]
+    prompt = "".join(prompt_parts) + "\n\nWhat is the next action? Output ONLY JSON."
 
-    response = model.generate_content(content)
+    response = client.models.generate_content(
+        model="gemini-2.0-flash",
+        contents=[prompt, current_image]
+    )
     content_text = response.text.strip()
 
     # Parse JSON from response
@@ -79,16 +82,16 @@ def get_next_action(goal: str, screenshot_b64: str, history: list[dict] = None) 
         return {"action": "done", "result": f"Failed: Could not parse model response: {content_text}"}
 
 # Execute a goal by repeatedly passing actions
-def execute_goal(goal: str, max_steps: int = 20, on_step=None):
+def execute_goal(goal: str, max_steps: int = 20, on_step=None) -> GoalResult:
 
-    history = []
+    history: list[HistoryEntry] = []
 
     for step in range(max_steps):
         # Get current screen state
         current_screenshot = screenshot()
 
         # Ask model for next action
-        action = get_next_action(goal, current_screenshot, history)
+        action = get_next_action(goal, current_screenshot, [{"action": h.action, "screenshot": h.screenshot} for h in history])
 
         print(f"[STEP {step + 1}] {action}")
 
@@ -98,28 +101,28 @@ def execute_goal(goal: str, max_steps: int = 20, on_step=None):
 
         # Check if done
         if action.get("action") == "done":
-            return {
-                "success": "Failed" not in action.get("result", ""),
-                "result": action.get("result", "Completed"),
-                "steps": step + 1
-            }
+            return GoalResult(
+                success="Failed" not in action.get("result", ""),
+                result=action.get("result", "Completed"),
+                steps=step + 1
+            )
 
         # Execute the action
         try:
             result_screenshot = execute_action(action)
-            history.append({
-                "action": action,
-                "screenshot": result_screenshot
-            })
+            history.append(HistoryEntry(
+                action=action,
+                screenshot=result_screenshot
+            ))
         except Exception as e:
-            return {
-                "success": False,
-                "result": f"Action failed: {str(e)}",
-                "steps": step + 1
-            }
+            return GoalResult(
+                success=False,
+                result=f"Action failed: {str(e)}",
+                steps=step + 1
+            )
 
-    return {
-        "success": False,
-        "result": f"Reached max steps ({max_steps}) without completing goal",
-        "steps": max_steps
-    }
+    return GoalResult(
+        success=False,
+        result=f"Reached max steps ({max_steps}) without completing goal",
+        steps=max_steps
+    )

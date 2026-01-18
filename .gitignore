@@ -2,3 +2,6 @@ OVERVIEW.md
 TODOLIST.md
 device_bridge/venv
 device_bridge/venv*
+.env
+*env*
+backend/.env.local
