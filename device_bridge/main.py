@@ -6,9 +6,10 @@ import uuid
 
 # Configuration
 BACKEND_URL = "ws://localhost:8000/ws/device"
-DEVICE_ID = str(uuid.uuid4())
+DEVICE_ID = "macbook-1"
 RECONNECT_DELAY = 5
 
+# 
 async def send_status(ws, status: str, message: str = "", screenshot: str = None):
     payload = {
         "type": "status_update",

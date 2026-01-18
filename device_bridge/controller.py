@@ -62,24 +62,24 @@ def get_mouse_position() -> tuple[int, int]:
 def wait(seconds: float):
     time.sleep(seconds)
 
-ACTIONS = {
-    "click": click,
-    "double_click": double_click,
-    "right_click": right_click,
-    "type_text": type_text,
-    "type_unicode": type_unicode,
-    "hotkey": hotkey,
-    "press": press,
-    "scroll": scroll,
-    "move_to": move_to,
-    "drag_to": drag_to,
-    "wait": wait,
+ACTION_PARAMS = {
+    "click": ["x", "y"],
+    "double_click": ["x", "y"],
+    "right_click": ["x", "y"],
+    "type_text": ["text"],
+    "type_unicode": ["text"],
+    "hotkey": ["keys"],
+    "press": ["key"],
+    "scroll": ["clicks"],
+    "move_to": ["x", "y"],
+    "drag_to": ["x", "y"],
+    "wait": ["seconds"],
 }
 
 def execute_action(action: dict) -> str:
     action_name = action.get("action")
 
-    if action_name not in ACTIONS:
+    if action_name not in ACTION_PARAMS:
         raise ValueError(f"Unknown action: {action_name}")
 
     if action_name == "click":
