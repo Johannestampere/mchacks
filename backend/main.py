@@ -12,6 +12,9 @@ import os
 from dataclasses import dataclass
 from typing import Optional
 
+from dotenv import load_dotenv
+load_dotenv()
+
 import httpx
 import websockets
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -266,7 +269,7 @@ async def ws_phone(websocket: WebSocket) -> None:
                 async with httpx.AsyncClient() as client:
                     await client.post(
                         "http://localhost:8001/task",  # TODO: configure LAM endpoint
-                        json={"goal": response.goal, "device_type": response.task_type},
+                        json={"goal": response.goal, "type": "laptop_task"},
                         timeout=10.0,
                     )
             except httpx.ConnectError:

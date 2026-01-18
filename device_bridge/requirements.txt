@@ -3,3 +3,6 @@ pyautogui
 Pillow
 google-genai
 python-dotenv
+fastapi
+uvicorn
+requests

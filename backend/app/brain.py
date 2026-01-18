@@ -12,6 +12,9 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 import httpx
+from dotenv import load_dotenv
+
+load_dotenv()
 
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1/chat/completions"
